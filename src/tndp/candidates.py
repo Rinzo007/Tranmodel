@@ -9,6 +9,7 @@ import numpy as np
 
 from .corridors import DemandCorridor
 from .model import NetworkDesignConfig, Route
+from .route_economics import calculate_route_characteristics
 
 
 def _shortest_path(graph: nx.Graph, origin: int, destination: int) -> tuple[list[int], float]:
@@ -59,7 +60,12 @@ def _insert_high_demand_nodes(graph: nx.Graph, base_path: list[int], demand_vect
 def generate_route_candidates(corridors: list[DemandCorridor], graph: nx.Graph, node_xy_km: np.ndarray,
                               node_ids: list[int] | None = None, demand_vector: np.ndarray | None = None,
                               terminal_nodes: set[int] | None = None, config: NetworkDesignConfig | None = None) -> list[Route]:
-    """Generate directed route candidates on the real road graph."""
+    """Generate directed route candidates on the real road graph.
+
+    Corridor demand is used as the default maximum-section flow input. The
+    resulting route frequency is calculated from flow/capacity and the
+    operating interval rule, rather than using a fixed 6 vph value.
+    """
     config = config or NetworkDesignConfig()
     if node_ids is None:
         node_ids = list(map(int, graph.nodes))
@@ -101,5 +107,26 @@ def generate_route_candidates(corridors: list[DemandCorridor], graph: nx.Graph, 
             if sig in signatures:
                 continue
             signatures.add(sig)
-            routes.append(Route(nodes=sig, route_id=f"cand_{len(routes)+1:05d}", frequency_vph=6.0))
+            chars = calculate_route_characteristics(
+                2.0 * vlen,
+                corridor.demand,
+                capacity_at_4_ppm2=config.capacity_at_4_ppm2,
+                speed_kmh=config.speed_kmh,
+                interval_reserve_sec=config.interval_reserve_sec,
+                terminal_delay_reserve=config.terminal_delay_reserve,
+                charging_min_per_terminal=config.charging_min_per_terminal,
+                technical_readiness=(
+                    config.electric_technical_readiness
+                    if config.default_vehicle_type == "electric_transit"
+                    else config.bus_technical_readiness
+                ),
+                frequency_profile=config.frequency_profile,
+            )
+            routes.append(Route(
+                nodes=sig,
+                route_id=f"cand_{len(routes)+1:05d}",
+                frequency_vph=chars.frequency_vph,
+                max_section_flow_pph=float(corridor.demand),
+                vehicle_type=config.default_vehicle_type,
+            ))
     return routes
