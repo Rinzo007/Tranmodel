@@ -89,14 +89,18 @@ def run_tndp(config=None, *, full_assignment=True, progress=None):
     notify(f"Быстрый отбор завершён: {len(shortlist)} кандидатов перед TNDP")
 
     if full_assignment:
-        notify("Подготавливаем проект AequilibraE...")
-        project_path = build_project(force=False, progress=notify)
-        notify("Проект AequilibraE готов. Запускаем оптимизацию маршрутной сети...")
+        notify("Подготавливаем минимальный Transit-проект AequilibraE...")
+        project_path = build_project(force=False, progress=notify, mode="transit")
+        notify("Transit-проект AequilibraE готов. Запускаем оптимизацию маршрутной сети...")
+
         def evaluator(route_set):
             if not route_set.route_count():
                 return _empty_evaluation(demand, config)
-            return evaluate_route_set_aequilibrae(route_set, demand, stop_lonlat_xy, project_path, config,
-                                                  road_graph=road_graph, stop_mapping=stop_mapping, cache_dir=EVAL_CACHE)
+            return evaluate_route_set_aequilibrae(
+                route_set, demand, stop_lonlat_xy, project_path, config,
+                road_graph=road_graph, stop_mapping=stop_mapping, cache_dir=EVAL_CACHE,
+            )
+
         fast_evaluator = lambda rs: surrogate_evaluator(demand, zone_xy, rs, config, zone_to_stop, stop_xy)
     else:
         evaluator = lambda rs: surrogate_evaluator(demand, zone_xy, rs, config, zone_to_stop, stop_xy)
