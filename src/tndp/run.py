@@ -36,22 +36,33 @@ def _load_inputs():
     road_graph = build_tndp_graph(roads)
     _, stop_mapping, _ = snap_stops_to_graph(road_graph, stops)
     stop_graph = add_stop_nodes(road_graph, stop_mapping, k_neighbors=8)
+
     stop_xy = np.column_stack([stops.geometry.x.to_numpy(dtype=float), stops.geometry.y.to_numpy(dtype=float)]) / 1000.0
     zone_points = zones.geometry.centroid
     zone_xy = np.column_stack([zone_points.x.to_numpy(dtype=float), zone_points.y.to_numpy(dtype=float)]) / 1000.0
-    zone_tree = cKDTree(stop_xy)
-    _, zone_to_stops = zone_tree.query(zone_xy, k=min(4, len(stops)))
+
+    # Zone -> nearby stops is used for candidate generation. Stop -> zone is a
+    # separate mapping: every stop is assigned to its nearest transport-zone
+    # centroid, avoiding the previous many-zones-to-one-stop inversion.
+    stop_tree = cKDTree(stop_xy)
+    _, zone_to_stops = stop_tree.query(zone_xy, k=min(4, len(stops)))
     zone_to_stops = np.atleast_2d(zone_to_stops)
     if zone_to_stops.shape[0] != len(zones):
         zone_to_stops = zone_to_stops.T
     zone_to_stop = zone_to_stops[:, 0].astype(int)
+
+    zone_tree = cKDTree(zone_xy)
+    _, stop_to_zone_idx = zone_tree.query(stop_xy, k=1)
+    stop_to_zone = {int(stop): int(zone) for stop, zone in enumerate(np.asarray(stop_to_zone_idx, dtype=int))}
+
     terminal_nodes = set(np.flatnonzero(stops["is_terminal"].fillna(False).to_numpy()).tolist())
     stop_demand = np.zeros(len(stops), dtype=float)
     zone_mass = zones["production"].to_numpy(dtype=float) + zones["attraction"].to_numpy(dtype=float)
     np.add.at(stop_demand, zone_to_stop, zone_mass)
     stop_lonlat = stops.to_crs("EPSG:4326")
     stop_lonlat_xy = np.column_stack([stop_lonlat.geometry.x.to_numpy(dtype=float), stop_lonlat.geometry.y.to_numpy(dtype=float)])
-    return demand, zones, stops, road_graph, stop_graph, stop_mapping, stop_xy, zone_xy, zone_to_stop, zone_to_stops, stop_demand, stop_lonlat_xy, terminal_nodes
+    return (demand, zones, stops, road_graph, stop_graph, stop_mapping, stop_xy, zone_xy,
+            zone_to_stop, zone_to_stops, stop_to_zone, stop_demand, stop_lonlat_xy, terminal_nodes)
 
 
 def _map_corridors_to_stops(corridors, zone_to_stop):
@@ -80,7 +91,8 @@ def run_tndp(config=None, *, full_assignment=True, progress=None):
         run_zone_od(zone_size_m=750.0, force=False)
 
     notify("Загружаем зоны, остановки и реальный дорожный граф...")
-    demand, zones, stops, road_graph, stop_graph, stop_mapping, stop_xy, zone_xy, zone_to_stop, zone_to_stops, stop_demand, stop_lonlat_xy, terminal_nodes = _load_inputs()
+    (demand, zones, stops, road_graph, stop_graph, stop_mapping, stop_xy, zone_xy,
+     zone_to_stop, zone_to_stops, stop_to_zone, stop_demand, stop_lonlat_xy, terminal_nodes) = _load_inputs()
     notify(f"Загружено: {len(zones)} зон, {len(stops)} остановок, {road_graph.number_of_nodes():,} узлов дорог")
     zone_corridors = extract_demand_corridors(demand, zone_xy, top_pairs=config.corridor_top_pairs, max_distance_km=config.corridor_distance_km)
     corridors = _map_corridors_to_stops(zone_corridors, zone_to_stop)
@@ -102,12 +114,16 @@ def run_tndp(config=None, *, full_assignment=True, progress=None):
         notify("Подготавливаем минимальный Transit-проект AequilibraE...")
         project_path = build_project(force=False, progress=notify, mode="transit")
         notify("Transit-проект AequilibraE готов. Запускаем оптимизацию маршрутной сети...")
+
         def evaluator(route_set):
             if not route_set.route_count():
                 return _empty_evaluation(demand, config)
-            return evaluate_route_set_aequilibrae(route_set, demand, stop_lonlat_xy, project_path, config,
-                                                  road_graph=road_graph, stop_mapping=stop_mapping,
-                                                  path_index=path_index, cache_dir=EVAL_CACHE)
+            return evaluate_route_set_aequilibrae(
+                route_set, demand, stop_lonlat_xy, project_path, config,
+                road_graph=road_graph, stop_mapping=stop_mapping, path_index=path_index,
+                stop_to_zone=stop_to_zone, cache_dir=EVAL_CACHE,
+            )
+
         fast_evaluator = lambda rs: surrogate_evaluator(demand, zone_xy, rs, config, zone_to_stop, stop_xy)
     else:
         evaluator = lambda rs: surrogate_evaluator(demand, zone_xy, rs, config, zone_to_stop, stop_xy)
@@ -127,6 +143,8 @@ def run_tndp(config=None, *, full_assignment=True, progress=None):
         "score": float(ev.score), "user_cost": float(ev.user_cost), "direct_demand_share": float(ev.direct_demand_share), "uncovered_demand": float(ev.uncovered_demand),
         "transfers": float(ev.transfers), "operator_annual_mileage_km": float(ev.operator_cost), "capacity_excess": float(ev.capacity_excess),
         "annual_in_service_hours": float(ev.metadata.get("annual_in_service_hours", 0.0)), "fleet": int(ev.metadata.get("fleet", 0)),
+        "annual_contract_cost_mln": float(ev.metadata.get("annual_contract_cost_mln", 0.0)),
+        "annual_amortization_mln": float(ev.metadata.get("annual_amortization_mln", 0.0)),
         "route_characteristics": route_characteristics,
         "route_set": str(route_path), "route_geojson": str(geojson_path), "evaluator": ev.metadata.get("evaluator", "unknown"), "full_assignment": bool(full_assignment),
     }
