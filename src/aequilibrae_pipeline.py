@@ -11,7 +11,7 @@ Workflow:
   5. Run equilibrium traffic assignment (BFW/BPR) and export link loads.
 
 The resulting project is stored in data/cache/aequilibrae/ and can be opened
-from QAequilibraE/QGIS as a normal AequilibraE project.
+from QGIS/AequilibraE as a normal AequilibraE project.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import LineString
 
-from config import CACHE_DIR, LAYERS_DIR, PROJ_EPSG, REPORT_DIR
+from config import CACHE_DIR, LAYERS_DIR, REPORT_DIR
 
 AEQ_DIR = CACHE_DIR / "aequilibrae"
 GMNS_DIR = AEQ_DIR / "gmns"
@@ -327,7 +327,8 @@ def run_assignment(project, demand_matrix) -> tuple[pd.DataFrame, pd.DataFrame]:
     assignment.rgap_target = 0.001
     assignment.execute()
 
-    load = assignment.results().reset_index()
+    results = assignment.results()
+    load = results.get_load_results().reset_index()
     convergence = assignment.report()
     assignment.save_results("aequilibrae_assignment", keep_zero_flows=False, project=project)
     return load, convergence
