@@ -94,7 +94,6 @@ class NetworkDesignConfig:
     corridor_distance_km: float = 8.0
     iterations: int = 100
 
-    # Operating assumptions for conditional route calculations.
     speed_kmh: float = 18.0
     capacity_at_4_ppm2: float = 73.0
     interval_reserve_sec: float = 20.0
@@ -107,6 +106,7 @@ class NetworkDesignConfig:
     frequency_profile: tuple[tuple[float, float], ...] = (
         (3.0, 1.00), (6.0, 0.75), (4.0, 1.00), (3.0, 0.60), (8.0, 0.30)
     )
+    default_vehicle_type: str = "bus"
 
     min_frequency_vph: float = 3.0
     max_frequency_vph: float = 15.0
@@ -156,6 +156,8 @@ class NetworkDesignConfig:
             raise ValueError("Invalid annualization parameters")
         if not self.frequency_profile or any(h < 0 or m < 0 for h, m in self.frequency_profile):
             raise ValueError("Invalid frequency profile")
+        if self.default_vehicle_type not in {"bus", "electric_transit"}:
+            raise ValueError("default_vehicle_type must be 'bus' or 'electric_transit'")
         if self.full_candidates_per_iteration < 1:
             raise ValueError("full_candidates_per_iteration must be positive")
         if self.beam_width < 1 or self.beam_expansion_per_state < 1:
