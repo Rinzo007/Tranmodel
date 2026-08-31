@@ -30,32 +30,33 @@ def show_map(m: folium.Map, height: int = 600):
 st.sidebar.title("Tranmodel")
 st.sidebar.caption("Воронеж · OSM + WorldPop + AequilibraE + TNDP")
 section = st.sidebar.radio("Раздел", [
-    "Обзор", "Спрос", "Корреспонденции", "TNDP — Синтез маршрутов", "Benchmark",
+    "Обзор", "Спрос", "Транспортные зоны", "Корреспонденции",
+    "TNDP — Синтез маршрутов", "Benchmark",
 ])
 
 if section == "Обзор":
     st.title("Автоматический синтез маршрутной сети Воронежа")
     st.markdown(
-        "Главная задача модели — получить матрицу корреспонденций и на её основе "
-        "автоматически сформировать маршрутную сеть. AequilibraE используется "
-        "для сетевого расчёта и оценки общественного транспорта."
+        "Главная задача модели — получить матрицу корреспонденций между независимыми "
+        "транспортными зонами и на её основе автоматически сформировать маршрутную сеть. "
+        "Остановки ОТ и дорожные узлы являются отдельными сущностями сети."
     )
-    p1 = report("phase1_real/phase1_report.json")
-    p2 = report("phase2/phase2_report.json")
+    zn = report("zones/zones_report.json")
+    zo = report("zone_od/zone_od_report.json")
     tn = report("tndp/tndp_report.json")
     if tn:
         a, b, c, d = st.columns(4)
         a.metric("Маршрутов", f"{tn.get('n_routes', 0):,}")
-        b.metric("Кандидатов", f"{tn.get('n_candidates', 0):,}")
+        b.metric("Зон", f"{tn.get('n_zones', 0):,}")
         c.metric("Коридоров OD", f"{tn.get('n_corridors', 0):,}")
         d.metric("Обслужено спроса", f"{tn.get('direct_demand_share', 0) * 100:.1f}%")
-    elif p1 or p2:
+    elif zo or zn:
         a, b, c = st.columns(3)
-        a.metric("Остановок", f"{(p1 or {}).get('n_stops', 0):,}")
-        b.metric("Поездок", f"{(p2 or {}).get('total_trips', 0):,.0f}")
-        c.metric("OD-пар", f"{(p2 or {}).get('n_od_pairs', 0):,}")
+        a.metric("Транспортных зон", f"{(zn or {}).get('n_zones', 0):,}")
+        b.metric("Поездок", f"{(zo or {}).get('total_trips', 0):,.0f}")
+        c.metric("Среднее время", f"{(zo or {}).get('avg_network_time_min', 0):.1f} мин")
     else:
-        st.info("Сначала подготовьте спрос и матрицу корреспонденций.")
+        st.info("Сначала подготовьте данные спроса.")
 
 elif section == "Спрос":
     st.title("Спрос")
@@ -65,31 +66,79 @@ elif section == "Спрос":
         a.metric("Остановок", f"{rep['n_stops']:,}")
         b.metric("Население", f"{rep['population_sum_by_stop']:,.0f}")
         c.metric("Рабочих мест", f"{rep['jobs_sum_by_stop']:,.0f}")
-        st.markdown((REPORT_DIR / "phase1_real_report.md").read_text(encoding="utf-8") if (REPORT_DIR / "phase1_real_report.md").exists() else "")
+        md = REPORT_DIR / "phase1_real_report.md"
+        if md.exists():
+            st.markdown(md.read_text(encoding="utf-8"))
     else:
         st.info("Данные спроса ещё не рассчитаны.")
 
+elif section == "Транспортные зоны":
+    st.title("Транспортные зоны")
+    st.write("Зоны независимы от остановок ОТ. Они используются как единицы происхождения и назначения поездок.")
+    from src.zones import build_transport_zones
+    from src.zone_od import run_zone_od
+
+    a, b = st.columns(2)
+    size_m = a.number_input("Размер зоны, м", 300, 2000, 750, step=50)
+    force = b.checkbox("Пересоздать зоны", value=False)
+    if st.button("Построить зоны и OD", type="primary"):
+        with st.spinner("Строим зоны, коннекторы и сетевую OD-матрицу..."):
+            try:
+                build_transport_zones(size_m=float(size_m), force=bool(force))
+                result = run_zone_od(zone_size_m=float(size_m), force=True)
+                st.success("Зоны и OD-матрица построены.")
+                st.json(result)
+                st.cache_data.clear()
+            except Exception as exc:
+                st.exception(exc)
+
+    zn = report("zones/zones_report.json")
+    zo = report("zone_od/zone_od_report.json")
+    if zn:
+        a, b, c = st.columns(3)
+        a.metric("Зон", f"{zn.get('n_zones', 0):,}")
+        b.metric("Население", f"{zn.get('population', 0):,.0f}")
+        c.metric("Притяжение", f"{zn.get('jobs', 0):,.0f}")
+        zpath = CACHE_DIR / "zones" / "zones.parquet"
+        if zpath.exists():
+            zones = gpd.read_parquet(zpath).to_crs("EPSG:4326")
+            m = folium.Map(location=[51.66, 39.20], zoom_start=10, tiles="CartoDB positron")
+            folium.GeoJson(
+                zones[["zone_id", "population", "jobs", "geometry"]],
+                tooltip=folium.GeoJsonTooltip(fields=["zone_id", "population", "jobs"]),
+                style_function=lambda _: {"weight": 0.5, "fillOpacity": 0.08},
+            ).add_to(m)
+            show_map(m)
+    if zo:
+        st.subheader("OD транспортных зон")
+        a, b = st.columns(2)
+        a.metric("Поездок", f"{zo.get('total_trips', 0):,.0f}")
+        b.metric("Среднее время", f"{zo.get('avg_network_time_min', 0):.1f} мин")
+        md = REPORT_DIR / "zone_od_report.md"
+        if md.exists():
+            st.markdown(md.read_text(encoding="utf-8"))
+
 elif section == "Корреспонденции":
     st.title("Матрица корреспонденций")
-    rep = report("phase2/phase2_report.json")
-    if rep:
-        a, b, c, d = st.columns(4)
-        a.metric("Поездок", f"{rep.get('total_trips', 0):,.0f}")
-        b.metric("OD-пар", f"{rep.get('n_od_pairs', 0):,}")
-        c.metric("Средняя дальность", f"{rep.get('avg_dist_km', 0):.2f} км")
-        d.metric("Затухание", f"{rep.get('decay_radius_km', 0):.1f} км")
-        st.markdown((REPORT_DIR / "phase2_report.md").read_text(encoding="utf-8") if (REPORT_DIR / "phase2_report.md").exists() else "")
+    zo = report("zone_od/zone_od_report.json")
+    if zo:
+        a, b, c = st.columns(3)
+        a.metric("Поездок", f"{zo.get('total_trips', 0):,.0f}")
+        b.metric("OD-пар", f"{zo.get('od_pairs', 0):,}")
+        c.metric("Среднее время", f"{zo.get('avg_network_time_min', 0):.1f} мин")
+        md = REPORT_DIR / "zone_od_report.md"
+        if md.exists():
+            st.markdown(md.read_text(encoding="utf-8"))
     else:
-        st.info("Матрица корреспонденций ещё не рассчитана.")
+        st.info("Постройте транспортные зоны и OD-матрицу в разделе «Транспортные зоны».")
 
 elif section == "TNDP — Синтез маршрутов":
     st.title("TNDP — синтез маршрутной сети")
     st.write(
-        "Генератор использует OD-коридоры, терминальные ограничения и дорожную сеть. "
-        "Сначала кандидаты проходят быстрый отбор, затем лучшие маршрутные сети "
-        "оцениваются через AequilibraE Transit Assignment / Optimal Strategies."
+        "OD-коридоры строятся между транспортными зонами. Кандидатные маршруты проходят "
+        "по реальному дорожному графу через независимые остановки ОТ. Лучшие сети оцениваются "
+        "через AequilibraE Transit Assignment / Optimal Strategies."
     )
-
     from src.tndp.model import NetworkDesignConfig
     from src.tndp.run import run_tndp
 
@@ -122,16 +171,20 @@ elif section == "TNDP — Синтез маршрутов":
     if rep:
         a, b, c, d, e = st.columns(5)
         a.metric("Маршрутов", f"{rep.get('n_routes', 0):,}")
-        b.metric("Кандидатов", f"{rep.get('n_candidates', 0):,}")
+        b.metric("Зон", f"{rep.get('n_zones', 0):,}")
         c.metric("Коридоров", f"{rep.get('n_corridors', 0):,}")
         d.metric("Обслужено", f"{rep.get('direct_demand_share', 0) * 100:.1f}%")
         e.metric("Пересадки", f"{rep.get('transfers', 0):.2f}")
         st.caption(f"Оценщик: {rep.get('evaluator', '—')}")
-        if (REPORT_DIR / "tndp_report.md").exists():
-            st.markdown((REPORT_DIR / "tndp_report.md").read_text(encoding="utf-8"))
-        route_path = Path(rep["route_set"])
+        md = REPORT_DIR / "tndp_report.md"
+        if md.exists():
+            st.markdown(md.read_text(encoding="utf-8"))
+        route_path = Path(rep.get("route_set", ""))
         if route_path.exists():
             st.download_button("Скачать generated_routes.json", route_path.read_bytes(), "generated_routes.json")
+        geo_path = Path(rep.get("route_geojson", ""))
+        if geo_path.exists():
+            st.download_button("Скачать generated_routes.geojson", geo_path.read_bytes(), "generated_routes.geojson")
     else:
         st.info("Синтез ещё не выполнялся.")
 
