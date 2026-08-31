@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
@@ -10,13 +11,13 @@ from .model import Evaluation, NetworkDesignConfig, Route, RouteSet
 from .mutations import mutate_route_set
 
 
+@dataclass
 class TNDPResult:
     """Result of TNDP construction and local network search."""
 
-    def __init__(self, routes: RouteSet, evaluation: Evaluation, history: list[dict]):
-        self.routes = routes
-        self.evaluation = evaluation
-        self.history = history
+    routes: RouteSet
+    evaluation: Evaluation
+    history: list[dict]
 
 
 Evaluator = Callable[[RouteSet], Evaluation]
