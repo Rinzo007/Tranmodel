@@ -15,8 +15,9 @@ from config import PROJ_EPSG
 from .gtfs import build_gtfs_from_route_set
 from .model import Evaluation, NetworkDesignConfig, RouteSet
 from .route_economics import calculate_route_characteristics
+from .route_loads import reconstruct_route_loads, select_vehicle_for_route
 
-EVALUATOR_VERSION = "aeq-transit-v7-route-economics"
+EVALUATOR_VERSION = "aeq-transit-v8-segment-load-fleet"
 
 
 class AequilibraEEvaluationError(RuntimeError):
@@ -58,16 +59,65 @@ def _evaluation_json(value: Evaluation) -> str:
     return json.dumps(asdict(value), ensure_ascii=False, default=float, sort_keys=True)
 
 
+def _adapt_fleet(route_set: RouteSet, demand: np.ndarray, stop_to_zone: dict[int, int],
+                 route_lengths: list[float], config: NetworkDesignConfig) -> tuple[RouteSet, list[dict]]:
+    """Run a short load→vehicle→frequency fixed-point iteration."""
+    current = route_set
+    details_out: list[dict] = []
+    for _ in range(2):
+        loads = reconstruct_route_loads(current, demand, stop_to_zone=stop_to_zone,
+                                        route_lengths_km=route_lengths,
+                                        frequencies_vph=[r.frequency_vph for r in current.routes])
+        updated = []
+        details_out = []
+        changed = False
+        for i, route in enumerate(current.routes):
+            flow = loads[i].max_section_flow_pph if i < len(loads) else _route_flow(route)
+            flow = max(flow, _route_flow(route))
+            vehicle_code, op = select_vehicle_for_route(
+                max_section_flow_pph=flow,
+                route_length_km=max(0.001, route_lengths[i] * 2.0),
+                allowed_vehicle_types=config.allowed_vehicle_types,
+                speed_kmh=config.speed_kmh,
+                interval_reserve_sec=config.interval_reserve_sec,
+                terminal_delay_reserve=config.terminal_delay_reserve,
+                charging_min_per_terminal=config.charging_min_per_terminal,
+                annual_days=config.annual_days,
+                park_trip_coefficient=config.park_trip_coefficient,
+                frequency_profile=config.frequency_profile,
+            )
+            new_route = route.with_flow(flow).with_vehicle_type(vehicle_code).with_frequency(float(op["frequency_vph"]))
+            changed |= new_route != route
+            updated.append(new_route)
+            details_out.append({
+                "max_section_flow_pph": float(flow),
+                "max_section_index": int(loads[i].max_section_index if i < len(loads) else -1),
+                "assigned_demand": float(loads[i].assigned_demand if i < len(loads) else 0.0),
+                **op,
+            })
+        current = RouteSet(updated)
+        if not changed:
+            break
+    return current, details_out
+
+
 def evaluate_route_set_aequilibrae(route_set: RouteSet, demand: np.ndarray, stop_xy_lonlat: np.ndarray,
                                    project_path: str | Path, config: NetworkDesignConfig, *,
                                    road_graph: nx.Graph, stop_mapping, path_index=None,
+                                   stop_to_zone: dict[int, int] | None = None,
                                    cache_dir: str | Path | None = None) -> Evaluation:
     total = float(np.asarray(demand, dtype=float).sum())
     if not route_set.routes:
         return Evaluation(score=total * config.uncovered_demand_weight, uncovered_demand=total,
                           direct_demand_share=0.0, metadata={"evaluator": "AequilibraE", "empty_network": True})
 
-    key = _route_set_key(route_set)
+    route_lengths = [_route_length_km(r, road_graph, stop_mapping, path_index) for r in route_set.routes]
+    adapted = route_set
+    fleet_details: list[dict] = []
+    if stop_to_zone:
+        adapted, fleet_details = _adapt_fleet(route_set, demand, stop_to_zone, route_lengths, config)
+
+    key = _route_set_key(adapted)
     root = Path(cache_dir) if cache_dir else Path(tempfile.mkdtemp(prefix="tranmodel_tndp_eval_"))
     root.mkdir(parents=True, exist_ok=True)
     result_path = root / f"{key}.json"
@@ -91,7 +141,7 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand: np.ndarray, stop
         if public_db.exists():
             public_db.unlink()
 
-        gtfs = build_gtfs_from_route_set(route_set, stop_xy_lonlat, temp_root / "routes.zip",
+        gtfs = build_gtfs_from_route_set(adapted, stop_xy_lonlat, temp_root / "routes.zip",
                                          road_graph=road_graph, stop_mapping=stop_mapping, path_index=path_index)
         project = Project.from_path(project_dir)
         transit = Transit(project)
@@ -146,58 +196,56 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand: np.ndarray, stop
         route_characteristics = []
         annual_mileage = 0.0
         annual_hours = 0.0
+        annual_contract = 0.0
+        annual_amortization = 0.0
         fleet = 0
-        for route in route_set.routes:
-            one_way_km = _route_length_km(route, road_graph, stop_mapping, path_index)
+        for i, route in enumerate(adapted.routes):
+            one_way_km = route_lengths[i]
             operating = calculate_route_characteristics(
-                2.0 * one_way_km,
-                _route_flow(route),
-                capacity_at_4_ppm2=config.capacity_at_4_ppm2,
-                speed_kmh=config.speed_kmh,
-                interval_reserve_sec=config.interval_reserve_sec,
+                2.0 * one_way_km, _route_flow(route), capacity_at_4_ppm2=route.capacity,
+                speed_kmh=config.speed_kmh, interval_reserve_sec=config.interval_reserve_sec,
                 terminal_delay_reserve=config.terminal_delay_reserve,
                 charging_min_per_terminal=config.charging_min_per_terminal,
-                technical_readiness=(config.electric_technical_readiness if getattr(route, "vehicle_type", "bus") == "electric_transit" else config.bus_technical_readiness),
+                technical_readiness=route.technical_readiness,
                 frequency_profile=config.frequency_profile,
             )
             annual_mileage += operating.annual_mileage_km
             annual_hours += operating.annual_in_service_hours
             fleet += operating.fleet
+            d = fleet_details[i] if i < len(fleet_details) else {}
+            annual_contract += float(d.get("annual_fleet_contract_cost_mln", 0.0))
+            annual_amortization += float(d.get("annual_fleet_amortization_mln", 0.0))
             route_characteristics.append({
-                "route_id": route.route_id,
-                "one_way_length_km": one_way_km,
+                "route_id": route.route_id, "one_way_length_km": one_way_km,
                 "round_trip_length_km": operating.route_length_km,
                 "max_section_flow_pph": operating.max_section_flow_pph,
-                "speed_kmh": operating.speed_kmh,
-                "frequency_vph": operating.frequency_vph,
-                "interval_min": operating.interval_min,
-                "turnaround_min": operating.turnaround_min,
-                "release": operating.release,
-                "technical_readiness": operating.technical_readiness,
-                "fleet": operating.fleet,
-                "daily_trips": operating.daily_trips,
-                "annual_mileage_km": operating.annual_mileage_km,
+                "frequency_vph": operating.frequency_vph, "interval_min": operating.interval_min,
+                "turnaround_min": operating.turnaround_min, "release": operating.release,
+                "technical_readiness": operating.technical_readiness, "fleet": operating.fleet,
+                "daily_trips": operating.daily_trips, "annual_mileage_km": operating.annual_mileage_km,
                 "annual_in_service_hours": operating.annual_in_service_hours,
-                "vehicle_type": getattr(route, "vehicle_type", "bus"),
+                "vehicle_type": getattr(route, "vehicle_type", "unknown"),
+                "vehicle_name": d.get("vehicle_name", ""), "capacity": route.capacity,
+                "annual_contract_cost_mln": d.get("annual_fleet_contract_cost_mln", 0.0),
+                "annual_amortization_mln": d.get("annual_fleet_amortization_mln", 0.0),
+                "max_section_index": d.get("max_section_index", -1),
+                "assigned_demand": d.get("assigned_demand", 0.0),
             })
 
-        # No monetary cost per km was supplied, so annual mileage is retained as
-        # the operator-resource indicator rather than converted into money.
-        score = (weighted_user_cost
-                 + annual_mileage * config.operator_route_km_weight
+        score = (weighted_user_cost + annual_mileage * config.operator_route_km_weight
                  + uncovered * config.uncovered_demand_weight
-                 + avg_transfers * config.transfer_penalty_min * config.transfer_weight)
+                 + avg_transfers * config.transfer_penalty_min * config.transfer_weight
+                 + (annual_contract + annual_amortization) * 0.05)
         evaluation = Evaluation(
-            score=float(score), user_cost=weighted_user_cost, operator_cost=float(annual_mileage),
-            uncovered_demand=uncovered, transfers=avg_transfers, direct_demand_share=direct_share,
-            metadata={
-                "evaluator": "AequilibraE",
-                "served_demand": served,
-                "annual_mileage_km": annual_mileage,
-                "annual_in_service_hours": annual_hours,
-                "fleet": fleet,
-                "route_characteristics": route_characteristics,
-            },
+            score=float(score), user_cost=weighted_user_cost,
+            operator_cost=float(annual_mileage), uncovered_demand=uncovered,
+            transfers=avg_transfers, direct_demand_share=direct_share,
+            metadata={"evaluator": "AequilibraE", "served_demand": served,
+                      "annual_mileage_km": annual_mileage, "annual_in_service_hours": annual_hours,
+                      "fleet": fleet, "annual_contract_cost_mln": annual_contract,
+                      "annual_amortization_mln": annual_amortization,
+                      "route_characteristics": route_characteristics,
+                      "adapted_vehicle_network": True},
         )
         result_path.write_text(_evaluation_json(evaluation), encoding="utf-8")
         return evaluation
