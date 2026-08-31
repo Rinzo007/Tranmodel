@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-import numpy as np
 import geopandas as gpd
+import numpy as np
 
 from config import CACHE_DIR, LAYERS_DIR, REPORT_DIR
 from .candidates import generate_route_candidates
@@ -16,7 +15,6 @@ from .model import NetworkDesignConfig, RouteSet
 from .network import add_stop_nodes, build_tndp_graph, snap_stops_to_graph
 from .optimizer import TNDPOptimizer, surrogate_evaluator
 
-
 OUTPUT_DIR = CACHE_DIR / "tndp"
 
 
@@ -25,24 +23,26 @@ def _stop_graph_and_inputs():
     roads = gpd.read_parquet(LAYERS_DIR / "roads.parquet")
     road_graph = build_tndp_graph(roads)
     _, stop_mapping, _ = snap_stops_to_graph(road_graph, stops)
-    stop_graph = add_stop_nodes(road_graph, stop_mapping)
+    stop_graph = add_stop_nodes(road_graph, stop_mapping, k_neighbors=8)
+    stop_proj = stops.to_crs("EPSG:32637")
     stop_xy = np.column_stack([
-        stops.geometry.x.to_numpy() / 1000.0,
-        stops.geometry.y.to_numpy() / 1000.0,
+        stop_proj.geometry.x.to_numpy() / 1000.0,
+        stop_proj.geometry.y.to_numpy() / 1000.0,
     ])
-    return demand, stops, stop_graph, stop_xy
+    terminal_nodes = set(np.flatnonzero(stops["is_terminal"].fillna(False).to_numpy()).tolist())
+    return demand, stops, stop_graph, stop_xy, terminal_nodes
 
 
 def run_tndp(config: NetworkDesignConfig | None = None) -> dict:
     """Generate a route network from the current OD matrix.
 
-    The first implementation uses a fast whole-route surrogate objective. The
-    resulting route set is suitable for candidate generation and benchmark
-    development; a full AequilibraE transit-assignment evaluator is the next
-    plug-in stage.
+    Candidate generation uses terminal restrictions and network shortest paths.
+    The current evaluator is a fast whole-route surrogate; it is intentionally
+    separated from the solver so AequilibraE Transit/Optimal Strategies can be
+    substituted without changing candidate generation or optimization.
     """
     config = config or NetworkDesignConfig()
-    demand, stops, graph, stop_xy = _stop_graph_and_inputs()
+    demand, stops, graph, stop_xy, terminal_nodes = _stop_graph_and_inputs()
     corridors = extract_demand_corridors(
         demand,
         stop_xy,
@@ -56,6 +56,7 @@ def run_tndp(config: NetworkDesignConfig | None = None) -> dict:
         stop_xy,
         node_ids=list(range(len(stops))),
         demand_vector=demand_vector,
+        terminal_nodes=terminal_nodes,
         config=config,
     )
 
@@ -73,6 +74,7 @@ def run_tndp(config: NetworkDesignConfig | None = None) -> dict:
     report = {
         "backend": "Tranmodel TNDP solver",
         "n_stops": int(len(stops)),
+        "n_terminals": int(len(terminal_nodes)),
         "n_corridors": int(len(corridors)),
         "n_candidates": int(len(candidates)),
         "n_routes": int(result.routes.route_count()),
@@ -92,15 +94,16 @@ def run_tndp(config: NetworkDesignConfig | None = None) -> dict:
             "# TNDP — синтез маршрутной сети",
             "",
             f"- Остановок-кандидатов: **{report['n_stops']:,}**",
+            f"- Терминальных остановок: **{report['n_terminals']:,}**",
             f"- OD-коридоров: **{report['n_corridors']:,}**",
             f"- Кандидатных маршрутов: **{report['n_candidates']:,}**",
             f"- Итоговых маршрутов: **{report['n_routes']:,}**",
-            f"- Прямо обслуживаемая доля спроса (быстрая оценка): **{report['direct_demand_share'] * 100:.1f}%**",
+            f"- Прямо обслуживаемая доля спроса (суррогатная оценка): **{report['direct_demand_share'] * 100:.1f}%**",
             f"- Необслуженный спрос: **{report['uncovered_demand']:,.1f}**",
             f"- Суммарная длина маршрутов: **{report['operator_route_km']:.1f} км**",
             "",
-            "## Важно",
-            "На этой стадии оценка выполняется быстрым суррогатным критерием. Следующая стадия должна заменять его полным AequilibraE Transit Assignment.",
+            "## Статус оценивания",
+            "Синтез маршрутов и ограничения уже отделены от оценщика. Текущий оценщик быстрый и предназначен для отбора кандидатов; для итоговой оптимизации его необходимо подключить к AequilibraE Transit Assignment.",
         ]),
         encoding="utf-8",
     )
