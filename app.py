@@ -1,223 +1,144 @@
-"""Streamlit UI for the Voronezh transport model (phases 0-4).
+"""Streamlit application for data preparation and TNDP route synthesis."""
 
-Run:  streamlit run app.py
-"""
-
-import json
 from pathlib import Path
+import json
 
-import folium
 import geopandas as gpd
-import pandas as pd
+import folium
 import streamlit as st
 from streamlit.components.v1 import html
 
 from config import CACHE_DIR, REPORT_DIR
 
-st.set_page_config(page_title="Воронеж — транспортная модель", layout="wide")
+st.set_page_config(page_title="Tranmodel — TNDP", layout="wide")
 
 
-def load_json(name: str) -> dict | None:
-    # try cache dir first (phases write json next to their parquet), then report dir
-    for base in (CACHE_DIR, REPORT_DIR):
-        p = base / name
-        if p.exists():
-            return json.load(open(p, encoding="utf-8"))
-    return None
+@st.cache_data(show_spinner=False)
+def load_json(path: str):
+    p = Path(path)
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
 
-def load_report_md(name: str) -> str:
-    p = REPORT_DIR / name
-    return p.read_text(encoding="utf-8") if p.exists() else "Отчёт не найден."
+def report(name: str):
+    return load_json(str(CACHE_DIR / name)) or load_json(str(REPORT_DIR / name))
 
 
-def folium_to_html(m: folium.Map) -> str:
-    from folium import IFrame
-    return m._repr_html_()
-
-
-def show_map(m: folium.Map, height: int = 560) -> None:
+def show_map(m: folium.Map, height: int = 600):
     html(m._repr_html_(), height=height, width=None)
 
 
-# ---------------------------------------------------------------------------
-st.sidebar.title("Транспортная модель Воронежа")
-st.sidebar.caption("М.Р. Якимов, 2022 — формирование маршрутной сети")
-phase = st.sidebar.radio(
-    "Фаза",
-    ["Обзор", "Фаза 0 — Данные", "Фаза 1 — Спрос",
-     "Фаза 2 — Корреспонденции", "Фаза 3 — Маршруты",
-     "Фаза 4 — Пассажиропоток"],
-)
+st.sidebar.title("Tranmodel")
+st.sidebar.caption("Воронеж · OSM + WorldPop + AequilibraE + TNDP")
+section = st.sidebar.radio("Раздел", [
+    "Обзор", "Спрос", "Корреспонденции", "TNDP — Синтез маршрутов", "Benchmark",
+])
 
-# ---------------------------------------------------------------------------
-if phase == "Обзор":
-    st.title("Транспортная модель городского округа Воронеж")
+if section == "Обзор":
+    st.title("Автоматический синтез маршрутной сети Воронежа")
     st.markdown(
-        "Многофазная модель на основе подхода М.Р. Якимова (2022): "
-        "данные OSM, население WorldPop, гравитационная матрица "
-        "корреспонденций, генерация маршрутов и расчёт пассажиропотока."
+        "Главная задача модели — получить матрицу корреспонденций и на её основе "
+        "автоматически сформировать маршрутную сеть. AequilibraE используется "
+        "для сетевого расчёта и оценки общественного транспорта."
     )
-    c1, c2, c3, c4 = st.columns(4)
-    p0 = load_json("phase0_report.json")
-    p1 = load_json("phase2_report.json") or {}
-    p2 = load_json("phase3_real/phase3_report.json")
-    p3 = load_json("phase3_real/phase3_report.json")
-    p4 = load_json("phase4/phase4_report.json")
-
-    c1.metric("Население (WorldPop)",
-              f"{p0['population']['total']:,.0f}" if p0 else "-")
-    c2.metric("Рабочих мест (N/2)", f"{p1.get('total_jobs', 0):,.0f}")
-    c3.metric("Маршрутов", f"{p3['n_routes']}" if p3 else "-")
-    c4.metric("Поездок на сеть", f"{p4['assigned_trips']:,.0f}" if p4 else "-")
-
-    st.subheader("Карта маршрутной сети и пассажиропотока")
-    if Path(REPORT_DIR / "phase4_map.html").exists():
-        show_map(folium.Map(location=[51.66, 39.2], zoom_start=11))
-        st.caption("Откройте вкладку «Фаза 4» для карты загрузки.")
+    p1 = report("phase1_real/phase1_report.json")
+    p2 = report("phase2/phase2_report.json")
+    tn = report("tndp/tndp_report.json")
+    if tn:
+        a, b, c, d = st.columns(4)
+        a.metric("Маршрутов", f"{tn.get('n_routes', 0):,}")
+        b.metric("Кандидатов", f"{tn.get('n_candidates', 0):,}")
+        c.metric("Коридоров OD", f"{tn.get('n_corridors', 0):,}")
+        d.metric("Обслужено спроса", f"{tn.get('direct_demand_share', 0) * 100:.1f}%")
+    elif p1 or p2:
+        a, b, c = st.columns(3)
+        a.metric("Остановок", f"{(p1 or {}).get('n_stops', 0):,}")
+        b.metric("Поездок", f"{(p2 or {}).get('total_trips', 0):,.0f}")
+        c.metric("OD-пар", f"{(p2 or {}).get('n_od_pairs', 0):,}")
     else:
-        st.info("Фаза 4 ещё не выполнена.")
+        st.info("Сначала подготовьте спрос и матрицу корреспонденций.")
 
-# ---------------------------------------------------------------------------
-elif phase == "Фаза 0 — Данные":
-    st.title("Фаза 0 — Исходные данные")
-    rep = load_json("phase0_report.json")
+elif section == "Спрос":
+    st.title("Спрос")
+    rep = report("phase1_real/phase1_report.json")
     if rep:
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Площадь", f"{rep['area_km2']} км²")
-        c2.metric("Население", f"{rep['population']['total']:,.0f}")
-        c3.metric("Дороги", f"{rep['roads']['total_km']} км")
-        c4.metric("Ж/д пути", f"{rep['rail']['km']} км")
-        c5.metric("Остановки (OSM)", f"{rep['stops']['count']}")
-    st.markdown(load_report_md("phase0_report.md"))
-    show_map(folium.Map(location=[51.66, 39.2], zoom_start=11))
-    st.caption("Откройте data/report/phase0_map.html в браузере для полной карты.")
+        a, b, c = st.columns(3)
+        a.metric("Остановок", f"{rep['n_stops']:,}")
+        b.metric("Население", f"{rep['population_sum_by_stop']:,.0f}")
+        c.metric("Рабочих мест", f"{rep['jobs_sum_by_stop']:,.0f}")
+        st.markdown((REPORT_DIR / "phase1_real_report.md").read_text(encoding="utf-8") if (REPORT_DIR / "phase1_real_report.md").exists() else "")
+    else:
+        st.info("Данные спроса ещё не рассчитаны.")
 
-# ---------------------------------------------------------------------------
-elif phase == "Фаза 1 — Спрос":
-    st.title("Фаза 1 — Спрос на перевозки (реальные остановки)")
-    rep = load_json("phase1_real/phase1_report.json")
+elif section == "Корреспонденции":
+    st.title("Матрица корреспонденций")
+    rep = report("phase2/phase2_report.json")
     if rep:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Остановок", f"{rep['n_stops']}")
-        c2.metric("Население приписано", f"{rep['population_sum_by_stop']:,.0f} "
-                                          f"({rep['coverage_pop_share']*100:.0f}%)")
-        c3.metric("Раб. мест приписано", f"{rep['jobs_sum_by_stop']:,.0f}")
-    st.markdown(load_report_md("phase1_real_report.md"))
-    stops = gpd.read_parquet(CACHE_DIR / "phase1_real" / "stops_demand.parquet")
-    m = folium.Map(location=[51.66, 39.2], zoom_start=11, tiles="CartoDB positron")
-    for _, s in stops.iterrows():
-        p = s.geometry.centroid
-        folium.CircleMarker(
-            location=[p.y, p.x], radius=4, fill=True, fillOpacity=0.5,
-            popup=f"pop={s['population']:.0f} jobs={s['jobs']:.0f} "
-                  f"routes={s['n_routes']} term={s['is_terminal']}",
-        ).add_to(m)
-    show_map(m)
+        a, b, c, d = st.columns(4)
+        a.metric("Поездок", f"{rep.get('total_trips', 0):,.0f}")
+        b.metric("OD-пар", f"{rep.get('n_od_pairs', 0):,}")
+        c.metric("Средняя дальность", f"{rep.get('avg_dist_km', 0):.2f} км")
+        d.metric("Затухание", f"{rep.get('decay_radius_km', 0):.1f} км")
+        st.markdown((REPORT_DIR / "phase2_report.md").read_text(encoding="utf-8") if (REPORT_DIR / "phase2_report.md").exists() else "")
+    else:
+        st.info("Матрица корреспонденций ещё не рассчитана.")
 
-# ---------------------------------------------------------------------------
-elif phase == "Фаза 2 — Корреспонденции":
-    st.title("Фаза 2 — Гравитационная матрица корреспонденций")
-    rep = load_json("phase2_report.json")
-    if rep:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Поездок (сумма матрицы)", f"{rep['total_trips']:,.0f}")
-        c2.metric("Радиус затухания", f"{rep['decay_radius_km']} км")
-        c3.metric("Пар OD", f"{rep['n_od_pairs']:,}")
-    st.markdown(load_report_md("phase2_report.md"))
-    show_map(folium.Map(location=[51.66, 39.2], zoom_start=11))
-    st.caption("data/report/phase2_map.html — линии корреспонденций.")
+elif section == "TNDP — Синтез маршрутов":
+    st.title("TNDP — синтез маршрутной сети")
+    st.write(
+        "Генератор использует OD-коридоры, терминальные ограничения и дорожную сеть. "
+        "Сначала кандидаты проходят быстрый отбор, затем лучшие маршрутные сети "
+        "оцениваются через AequilibraE Transit Assignment / Optimal Strategies."
+    )
 
-# ---------------------------------------------------------------------------
-elif phase == "Фаза 3 — Маршруты":
-    st.title("Фаза 3 — Маршрутная сеть")
-    rep = load_json("phase3_real/phase3_report.json")
-    if rep:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Маршрутов", f"{rep['n_routes']}")
-        c2.metric("Остановок охвачено", f"{rep['n_stops_served']}")
-        c3.metric("Ср. длина", f"{rep['avg_route_km_air']} км")
-        c4.metric("Суммарная длина", f"{rep['total_route_km_air']} км")
-        f = rep.get("formula", {})
-        if f:
-            st.markdown(
-                f"**Формула числа маршрутов:** m = {f.get('k1')}·N/​{f.get('interchange')} "
-                f"+ {f.get('k2')}·S/{f.get('interchange')} + {f.get('k3')}·O/{f.get('interchange')} "
-                f"= **{rep['route_count_formula_m']:.2f} → {rep['n_routes_formula']} маршрутов**  \n"
-                f"N (население) = {f.get('N_thousands'):,.0f} тыс., "
-                f"S (площадь) = {f.get('S_km2'):.0f} км², "
-                f"O (остановки из файла) = **{f.get('O_stops_file')}**"
+    from src.tndp.model import NetworkDesignConfig
+    from src.tndp.run import run_tndp
+
+    a, b, c, d, e = st.columns(5)
+    min_routes = a.number_input("Минимум маршрутов", 1, 200, 10)
+    max_routes = b.number_input("Максимум маршрутов", 1, 300, 30)
+    corridors = c.number_input("OD-коридоров", 10, 2000, 300)
+    candidates = d.number_input("Кандидатов/коридор", 1, 30, 8)
+    full = e.checkbox("Полная оценка AequilibraE", value=True)
+
+    if st.button("Синтезировать сеть", type="primary"):
+        if max_routes < min_routes:
+            st.error("Максимум маршрутов должен быть не меньше минимума.")
+        else:
+            cfg = NetworkDesignConfig(
+                min_routes=int(min_routes), max_routes=int(max_routes),
+                corridor_top_pairs=int(corridors), candidate_limit_per_corridor=int(candidates),
+                full_evaluation=bool(full),
             )
-    st.markdown(load_report_md("phase3_real_report.md"))
+            with st.spinner("Генерируем и оцениваем маршрутные сети..."):
+                try:
+                    result = run_tndp(cfg, full_assignment=bool(full))
+                    st.success("Синтез завершён.")
+                    st.json(result)
+                    st.cache_data.clear()
+                except Exception as exc:
+                    st.exception(exc)
 
-    routes = gpd.read_parquet(CACHE_DIR / "phase3_real" / "routes.parquet")
-    flat = pd.read_parquet(CACHE_DIR / "phase3_real" / "routes_flat.parquet")
-    stops = gpd.read_parquet(CACHE_DIR / "phase3_real" / "stops_pos.parquet")
-
-    show_all = st.checkbox("Показать все маршруты", value=True)
-    rid = st.selectbox("Выбрать маршрут",
-                       sorted(flat["route_id"].unique().tolist()),
-                       format_func=lambda x: f"Маршрут {x}")
-
-    m = folium.Map(location=[51.66, 39.2], zoom_start=11, tiles="CartoDB positron")
-    for _, r in routes.iterrows():
-        color = "#e41a1c"
-        if not show_all and int(r["route_id"]) != int(rid):
-            continue
-        if not show_all:
-            color = "#2166ac"
-        folium.PolyLine(
-            [[p[1], p[0]] for p in r.geometry.coords],
-            color=color, weight=3 if int(r["route_id"]) == int(rid) else 1.5,
-            opacity=0.8,
-            popup=f"route {r['route_id']}: {r['n_stops']} ст., {r['length_km']:.1f} км",
-        ).add_to(m)
-    show_map(m, height=600)
-
-    st.subheader(f"Остановки маршрута {rid}")
-    route_stops = flat[flat["route_id"] == int(rid)].sort_values("order")
-    names = route_stops["name"].tolist()
-    st.write(f"Всего остановок: **{len(names)}**")
-    st.write(" → ".join(str(n) for n in names if n is not None))
-
-# ---------------------------------------------------------------------------
-elif phase == "Фаза 4 — Пассажиропоток":
-    st.title("Фаза 4 — Пассажиропоток на маршрутной сети")
-    rep = load_json("phase4/phase4_report.json")
+    rep = report("tndp/tndp_report.json")
     if rep:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Распределено поездок", f"{rep['assigned_trips']:,.0f} "
-                                          f"({rep['assigned_share']*100:.0f}%)")
-        c2.metric("Макс. загрузка перегона", f"{rep['max_segment_load']:,.0f}")
-        c3.metric("Ср. коэфф. заполнения", f"{rep['avg_load_factor']:.2f}")
-        c4.metric("Ср. пересадок", f"{rep['avg_transfers']:.2f}")
-    st.markdown(load_report_md("phase4_report.md"))
+        a, b, c, d, e = st.columns(5)
+        a.metric("Маршрутов", f"{rep.get('n_routes', 0):,}")
+        b.metric("Кандидатов", f"{rep.get('n_candidates', 0):,}")
+        c.metric("Коридоров", f"{rep.get('n_corridors', 0):,}")
+        d.metric("Обслужено", f"{rep.get('direct_demand_share', 0) * 100:.1f}%")
+        e.metric("Пересадки", f"{rep.get('transfers', 0):.2f}")
+        st.caption(f"Оценщик: {rep.get('evaluator', '—')}")
+        if (REPORT_DIR / "tndp_report.md").exists():
+            st.markdown((REPORT_DIR / "tndp_report.md").read_text(encoding="utf-8"))
+        route_path = Path(rep["route_set"])
+        if route_path.exists():
+            st.download_button("Скачать generated_routes.json", route_path.read_bytes(), "generated_routes.json")
+    else:
+        st.info("Синтез ещё не выполнялся.")
 
-    seg = pd.read_parquet(CACHE_DIR / "phase4" / "segment_load.parquet")
-    routes = gpd.read_parquet(CACHE_DIR / "phase3_real" / "routes.parquet")
-
-    seg_max = float(seg["load"].max()) if len(seg) else 1.0
-    look = dict(zip(zip(seg["route_id"], seg["seg_order"]), seg["load"]))
-    cmap = folium.LinearColormap(
-        ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"],
-        vmin=0, vmax=seg_max, caption="Пассажиропоток на перегоне")
-
-    m = folium.Map(location=[51.66, 39.2], zoom_start=11, tiles="CartoDB positron")
-    for _, r in routes.iterrows():
-        coords = list(r.geometry.coords)
-        for k in range(len(coords) - 1):
-            load = look.get((int(r["route_id"]), k), 0.0)
-            folium.PolyLine(
-                [[coords[k][1], coords[k][0]], [coords[k + 1][1], coords[k + 1][0]]],
-                color=cmap(load), weight=3.0, opacity=0.85,
-                popup=f"route {r['route_id']} seg {k}: {load:,.0f}",
-            ).add_to(m)
-    cmap.add_to(m)
-    show_map(m, height=620)
-
-    st.subheader("Топ перегонов по загрузке")
-    seg_disp = seg.merge(
-        routes[["route_id", "n_stops", "length_km"]], on="route_id", how="left")
-    st.dataframe(
-        seg_disp.sort_values("load", ascending=False).head(100),
-        use_container_width=True)
+elif section == "Benchmark":
+    st.title("Benchmark TNDP")
+    st.write(
+        "Раздел подготовлен для проверки решателя на Mandl/Mumford/Rivera из "
+        "TransitNetworkDesign. Сравнение выполняется по целевой функции и структуре маршрутов."
+    )
+    st.code("python -m src.tndp.cli --benchmark mandl", language="powershell")

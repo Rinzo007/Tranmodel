@@ -19,11 +19,10 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 
-from config import CACHE_DIR, NAMES, PROJ_EPSG, REPORT_DIR
+from config import CACHE_DIR, NAMES, PROJ_EPSG, REFERENCE_ROUTES_PATH, REPORT_DIR
 
 JOBS_FACTOR = 0.5
 ACCESS_RADIUS_M = 500.0
-REF_GEOJSON = Path(r"D:\Programs\Project\voronezh_routes_terminals.geojson")
 
 
 class Phase1RealError(RuntimeError):
@@ -31,15 +30,15 @@ class Phase1RealError(RuntimeError):
 
 
 def load_ref_stops() -> gpd.GeoDataFrame:
-    """Load the reference stops and normalise to a GeoDataFrame of points."""
-    if not REF_GEOJSON.exists():
-        raise Phase1RealError(f"Reference file not found: {REF_GEOJSON}")
-    g = gpd.read_file(REF_GEOJSON).to_crs(PROJ_EPSG)
-    # keep unique stops (all rows are distinct bus stops)
+    """Load the repository-tracked reference stops and normalize to points."""
+    ref_geojson = REFERENCE_ROUTES_PATH
+    if not ref_geojson.exists():
+        raise Phase1RealError(f"Reference file not found: {ref_geojson}")
+    g = gpd.read_file(ref_geojson).to_crs(PROJ_EPSG)
     pts = g.geometry.centroid
     out = gpd.GeoDataFrame(
         {
-            "osm_id": -(np.arange(len(g)) + 1),  # synthetic negative ids
+            "osm_id": -(np.arange(len(g)) + 1),
             "kind": "stop",
             "name": g["name"],
             "is_terminal": g["is_terminal"],
@@ -65,10 +64,10 @@ def load_cells_from_raster() -> gpd.GeoDataFrame:
         crs = src.crs
 
     geoms, vals = [], []
-    for g, val in rio_shapes(arr, transform=transform):
+    for geom, val in rio_shapes(arr, transform=transform):
         if val is None or val <= 0:
             continue
-        geoms.append(to_shape(g))
+        geoms.append(to_shape(geom))
         vals.append(float(val))
     cells = gpd.GeoDataFrame({"pop": vals}, geometry=geoms, crs=crs).to_crs(PROJ_EPSG)
     cells["cx"] = cells.geometry.centroid.x
@@ -96,7 +95,6 @@ def assign_demand(stops, cells, pois_jobs):
     stop_xy = np.column_stack([stop_proj.geometry.x, stop_proj.geometry.y])
     tree = spatial.cKDTree(stop_xy)
 
-    # population cells -> stops
     cell_cx = cells["cx"].to_numpy()
     cell_cy = cells["cy"].to_numpy()
     cell_xy = np.column_stack([cell_cx, cell_cy])
@@ -106,7 +104,6 @@ def assign_demand(stops, cells, pois_jobs):
     cells["dist_m"] = dist
     pop_by_stop = cells.groupby("stop_idx")["pop"].sum().drop(labels=-1, errors="ignore")
 
-    # POI jobs -> stops
     poi_xy = np.column_stack([pois_jobs.geometry.x, pois_jobs.geometry.y])
     d2, i2 = tree.query(poi_xy, k=1)
     stop_of_poi = np.where(d2 <= radius[i2], i2, -1)
