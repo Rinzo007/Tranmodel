@@ -8,16 +8,18 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import geopandas as gpd
 import networkx as nx
 import numpy as np
+from scipy.spatial import cKDTree
 
-from config import PROJ_EPSG
+from config import CACHE_DIR, PROJ_EPSG
 from .gtfs import build_gtfs_from_route_set
 from .model import Evaluation, NetworkDesignConfig, RouteSet
 from .route_economics import calculate_route_characteristics
 from .route_loads import reconstruct_route_loads, select_vehicle_for_route
 
-EVALUATOR_VERSION = "aeq-transit-v8-segment-load-fleet"
+EVALUATOR_VERSION = "aeq-transit-v9-segment-load-fleet"
 
 
 class AequilibraEEvaluationError(RuntimeError):
@@ -59,9 +61,24 @@ def _evaluation_json(value: Evaluation) -> str:
     return json.dumps(asdict(value), ensure_ascii=False, default=float, sort_keys=True)
 
 
+def _infer_stop_to_zone(stop_xy_lonlat: np.ndarray) -> dict[int, int]:
+    """Build the same nearest-stop zone anchor used by the main TNDP loader."""
+    zones_path = CACHE_DIR / "zones" / "zones.parquet"
+    if not zones_path.exists():
+        return {}
+    zones = gpd.read_parquet(zones_path).to_crs("EPSG:4326").reset_index(drop=True)
+    points = zones.geometry.centroid
+    zone_xy = np.column_stack([points.x.to_numpy(float), points.y.to_numpy(float)])
+    stops_xy = np.asarray(stop_xy_lonlat, dtype=float)
+    if len(zone_xy) == 0 or len(stops_xy) == 0:
+        return {}
+    _, indices = cKDTree(stops_xy).query(zone_xy, k=1)
+    return {int(stop): int(zone) for zone, stop in enumerate(np.asarray(indices, dtype=int))}
+
+
 def _adapt_fleet(route_set: RouteSet, demand: np.ndarray, stop_to_zone: dict[int, int],
                  route_lengths: list[float], config: NetworkDesignConfig) -> tuple[RouteSet, list[dict]]:
-    """Run a short load→vehicle→frequency fixed-point iteration."""
+    """Run a short load -> vehicle -> frequency fixed-point iteration."""
     current = route_set
     details_out: list[dict] = []
     for _ in range(2):
@@ -112,6 +129,7 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand: np.ndarray, stop
                           direct_demand_share=0.0, metadata={"evaluator": "AequilibraE", "empty_network": True})
 
     route_lengths = [_route_length_km(r, road_graph, stop_mapping, path_index) for r in route_set.routes]
+    stop_to_zone = stop_to_zone or _infer_stop_to_zone(stop_xy_lonlat)
     adapted = route_set
     fleet_details: list[dict] = []
     if stop_to_zone:
@@ -140,7 +158,6 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand: np.ndarray, stop
         public_db = project_dir / "public_transport.sqlite"
         if public_db.exists():
             public_db.unlink()
-
         gtfs = build_gtfs_from_route_set(adapted, stop_xy_lonlat, temp_root / "routes.zip",
                                          road_graph=road_graph, stop_mapping=stop_mapping, path_index=path_index)
         project = Project.from_path(project_dir)
@@ -149,7 +166,6 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand: np.ndarray, stop
         builder.set_allow_map_match(False)
         builder.load_date("2026-01-15")
         builder.execute_import()
-
         graph_builder = transit.create_graph(
             projected_crs=f"EPSG:{PROJ_EPSG}", with_inner_stop_transfers=True,
             with_outer_stop_transfers=False, with_walking_edges=True,
@@ -194,10 +210,7 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand: np.ndarray, stop
         direct_share = float(demand[(finite) & (transfer_arr == 0)].sum() / max(total, 1.0))
 
         route_characteristics = []
-        annual_mileage = 0.0
-        annual_hours = 0.0
-        annual_contract = 0.0
-        annual_amortization = 0.0
+        annual_mileage = annual_hours = annual_contract = annual_amortization = 0.0
         fleet = 0
         for i, route in enumerate(adapted.routes):
             one_way_km = route_lengths[i]
