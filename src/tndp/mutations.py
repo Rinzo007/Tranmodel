@@ -5,6 +5,7 @@ from __future__ import annotations
 import networkx as nx
 
 from .model import NetworkDesignConfig, Route, RouteSet
+from .vehicle_types import VEHICLE_TYPES
 
 
 def _valid(route: Route, graph: nx.Graph, config: NetworkDesignConfig) -> bool:
@@ -18,7 +19,7 @@ def _valid(route: Route, graph: nx.Graph, config: NetworkDesignConfig) -> bool:
 
 
 def generate_mutations(route: Route, graph: nx.Graph, config: NetworkDesignConfig) -> list[Route]:
-    """Generate bounded directed route mutations."""
+    """Generate bounded route, frequency and rolling-stock mutations."""
     out: list[Route] = []
     n = len(route.nodes)
     if n > config.min_stops:
@@ -36,29 +37,50 @@ def generate_mutations(route: Route, graph: nx.Graph, config: NetworkDesignConfi
             nodes = ((int(node),) + route.nodes) if side == 0 else (route.nodes + (int(node),))
             out.append(route.with_nodes(nodes))
 
-    # Reverse is a distinct directed route and is retained only when the
-    # directed road graph contains a feasible reverse path.
     out.append(route.reversed())
 
-    unique: dict[tuple[int, ...], Route] = {}
+    # Frequency mutations. They are deliberately modest because exact
+    # assignment will decide whether the change actually improves the network.
+    for factor in (0.75, 0.875, 1.125, 1.25):
+        frequency = max(config.min_frequency_vph, min(config.max_frequency_vph, route.frequency_vph * factor))
+        if abs(frequency - route.frequency_vph) > 1e-9:
+            out.append(route.with_frequency(frequency))
+
+    # Vehicle mutations are important because fleet composition is part of the
+    # network-design decision, not merely a post-processing step.
+    allowed = list(config.allowed_vehicle_types)
+    current = route.vehicle_type
+    if current in allowed:
+        candidates = sorted(allowed, key=lambda code: abs(VEHICLE_TYPES[code].capacity - route.capacity))
+        for code in candidates[: min(5, len(candidates))]:
+            if code != current:
+                out.append(route.with_vehicle_type(code))
+    else:
+        for code in allowed[: min(5, len(allowed))]:
+            out.append(route.with_vehicle_type(code))
+
+    unique: dict[tuple, Route] = {}
     for candidate in out:
-        if candidate.nodes == route.nodes:
+        if candidate.nodes == route.nodes and candidate.frequency_vph == route.frequency_vph and candidate.vehicle_type == route.vehicle_type:
             continue
-        if _valid(candidate, graph, config):
-            unique.setdefault(candidate.nodes, candidate)
-        if len(unique) >= config.mutations_per_route:
+        # Geometry-changing mutations must remain feasible. Frequency/PС
+        # mutations keep geometry and therefore need no graph traversal.
+        if candidate.nodes != route.nodes and not _valid(candidate, graph, config):
+            continue
+        key = (candidate.nodes, round(candidate.frequency_vph, 6), candidate.vehicle_type)
+        unique.setdefault(key, candidate)
+        if len(unique) >= config.mutations_per_route * 2:
             break
     return list(unique.values())
 
 
 def mutate_route_set(route_set: RouteSet, graph: nx.Graph, config: NetworkDesignConfig):
-    """Yield route sets obtained by one local directed-route mutation."""
+    """Yield route sets obtained by one local route/frequency/vehicle mutation."""
     for index, route in enumerate(route_set.routes):
         for replacement in generate_mutations(route, graph, config):
             trial = route_set.copy()
             trial.routes[index] = replacement
-            # Exact directed duplicates are not allowed; opposite directions are.
-            if len({r.nodes for r in trial.routes}) != trial.route_count():
+            if len({(r.nodes, round(r.frequency_vph, 6), r.vehicle_type) for r in trial.routes}) != trial.route_count():
                 continue
             yield trial, {"operation": "mutate", "index": index, "route": replacement}
 
