@@ -1,5 +1,4 @@
 """Transit Network Design Problem (TNDP) solver for Tranmodel."""
-
 from .model import NetworkDesignConfig, Route, RouteSet, Evaluation
 from .corridors import DemandCorridor, extract_demand_corridors
 from .candidates import generate_route_candidates
@@ -9,7 +8,7 @@ from .pareto import ObjectiveVector, dominates, pareto_front, vector_from_evalua
 from .pareto_archive import ParetoArchive
 from .service_indicators import ServiceIndicators, safe_share, capacity_excess
 from .service_metrics import ServiceMetrics, generalized_cost
-from .interval_profile import IntervalPeriod, DEFAULT_INTERVAL_PROFILE, daily_frequency_factor, validate_profile
+from .interval_profile import IntervalPeriod, DEFAULT_INTERVAL_PROFILE, daily_frequency_factor, as_frequency_profile, validate_profile
 from .multi_period import PeriodPlan, build_period_plan, summarize_period_plan
 from .operating_plan import build_network_operating_plan
 
@@ -20,6 +19,6 @@ __all__ = [
     "ObjectiveVector", "dominates", "pareto_front", "vector_from_evaluation",
     "ParetoArchive", "ServiceIndicators", "safe_share", "capacity_excess",
     "ServiceMetrics", "generalized_cost", "IntervalPeriod", "DEFAULT_INTERVAL_PROFILE",
-    "daily_frequency_factor", "validate_profile", "PeriodPlan", "build_period_plan",
-    "summarize_period_plan", "build_network_operating_plan",
+    "daily_frequency_factor", "as_frequency_profile", "validate_profile",
+    "PeriodPlan", "build_period_plan", "summarize_period_plan", "build_network_operating_plan",
 ]
