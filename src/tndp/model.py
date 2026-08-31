@@ -61,6 +61,20 @@ class RouteSet:
 
 
 @dataclass(frozen=True, slots=True)
+class Evaluation:
+    """Objective-function result for a complete route-set evaluation."""
+
+    score: float
+    user_cost: float = 0.0
+    operator_cost: float = 0.0
+    uncovered_demand: float = 0.0
+    transfers: float = 0.0
+    direct_demand_share: float = 0.0
+    capacity_excess: float = 0.0
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class NetworkDesignConfig:
     """Constraints and weights for TNDP search."""
 
