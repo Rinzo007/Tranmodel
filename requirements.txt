@@ -1,3 +1,4 @@
+aequilibrae==1.7.0
 geopandas
 pandas
 numpy
