@@ -20,6 +20,7 @@ from .period_vehicle_plan import build_route_vehicle_plan, build_route_vehicle_p
 from .period_network_plan import reconcile_period_network
 from .economics_source import calculate_annual_route_economics, REQUIRED_COST_KEYS
 from .economics_validation import validate_route_economics
+from .economic_catalog_validation import validate_economic_catalogue, assert_economic_catalogue
 
 __all__ = [
     "NetworkDesignConfig", "Route", "RouteSet", "Evaluation", "DemandCorridor", "extract_demand_corridors", "generate_route_candidates",
@@ -30,5 +31,5 @@ __all__ = [
     "build_period_demands", "aggregate_period_assignments", "route_period_costs", "aggregate_route_costs", "aggregate_network_costs",
     "aggregate_peak_fleet", "evaluate_route_set_aequilibrae_periods", "PeriodRouteOperation", "reconcile_route_periods",
     "build_route_vehicle_plan", "build_route_vehicle_plan_auto", "build_network_vehicle_plan", "reconcile_period_network",
-    "calculate_annual_route_economics", "REQUIRED_COST_KEYS", "validate_route_economics",
+    "calculate_annual_route_economics", "REQUIRED_COST_KEYS", "validate_route_economics", "validate_economic_catalogue", "assert_economic_catalogue",
 ]
