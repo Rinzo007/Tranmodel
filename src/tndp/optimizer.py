@@ -1,4 +1,4 @@
-"""Whole-route TNDP optimizer with surrogate screening and bounded exact search."""
+"""Whole-route TNDP optimizer with surrogate screening, local search and Pareto archive."""
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
@@ -6,18 +6,21 @@ from .model import Evaluation, NetworkDesignConfig, Route, RouteSet
 from .mutations import mutate_route_set
 from .neighborhood import generate_network_moves
 from .objective import apply_objective
+from .pareto import compact_solution_record
+from .pareto_archive import ParetoArchive
 
 @dataclass
 class TNDPResult:
     routes: RouteSet
     evaluation: Evaluation
     history: list[dict]
+    pareto_archive: list[dict] | None = None
 
 Evaluator = Callable[[RouteSet], Evaluation]
 Progress = Callable[[str], None]
 
 class TNDPOptimizer:
-    """TNDP optimizer with constructive beam search and variable-size local search."""
+    """TNDP optimizer with constructive beam search, local search and bounded Pareto archive."""
     def __init__(self, candidates: list[Route], evaluator: Evaluator,
                  config: NetworkDesignConfig | None = None,
                  fast_evaluator: Evaluator | None = None,
@@ -31,10 +34,21 @@ class TNDPOptimizer:
         self._graph = None
         self._fast_cache: dict[tuple, Evaluation] = {}
         self._full_cache: dict[tuple, Evaluation] = {}
+        self.archive = ParetoArchive(max_size=100)
 
     @staticmethod
     def _key(network: RouteSet) -> tuple:
         return tuple(sorted((r.nodes, round(float(r.frequency_vph), 6), r.vehicle_type) for r in network.routes))
+
+    def _record(self, network: RouteSet, ev: Evaluation) -> None:
+        md = ev.metadata or {}
+        coverage = float(md.get("coverage_share", md.get("coverage_800m", 0.0)) or 0.0)
+        self.archive.add(compact_solution_record(
+            score=ev.score, route_count=network.route_count(),
+            annual_cost_mln=float(md.get("annual_contract_cost_mln", 0.0) or 0.0),
+            uncovered_demand=float(ev.uncovered_demand), coverage_share=coverage,
+            user_cost=float(ev.user_cost), transfers=float(ev.transfers),
+            fleet=int(md.get("fleet", 0) or 0), metadata={"key": repr(self._key(network))}))
 
     def _evaluate(self, network: RouteSet, full: bool = True) -> Evaluation:
         cache = self._full_cache if full else self._fast_cache
@@ -42,6 +56,7 @@ class TNDPOptimizer:
         if key not in cache:
             raw = (self.evaluator if full else self.fast_evaluator)(network)
             cache[key] = apply_objective(network, raw, self.config)
+            self._record(network, cache[key])
         return cache[key]
 
     def _notify(self, message: str) -> None:
@@ -118,13 +133,13 @@ class TNDPOptimizer:
             improved = bool(scored and scored[0][1].score + self.config.improvement_epsilon < current.score)
             if improved: network, current, stagnant = scored[0][0], scored[0][1], 0
             else: stagnant += 1
-            history.append({"phase": "construct", "iteration": iteration + 1, "routes": network.route_count(), "score": current.score, "beam_width": len(scored), "improved": improved, "feasible": current.metadata.get("feasible", True)})
-            self._notify(f"  лучшая сеть: {network.route_count()} маршрутов, оценка {current.score:.3f}")
+            history.append({"phase": "construct", "iteration": iteration + 1, "routes": network.route_count(), "score": current.score, "beam_width": len(scored), "improved": improved, "feasible": current.metadata.get("feasible", True), "pareto_size": len(self.archive.items)})
+            self._notify(f"  лучшая сеть: {network.route_count()} маршрутов, оценка {current.score:.3f}, Pareto={len(self.archive.items)}")
             if stagnant >= self.config.stagnation_rounds:
                 self._notify(f"  остановка конструктивного поиска: {stagnant} итерации без улучшения"); break
         network, current = self._local_search(network, current, history)
-        self._notify(f"Завершено: {network.route_count()} маршрутов, оценка {current.score:.3f}")
-        return TNDPResult(network, current, history)
+        self._notify(f"Завершено: {network.route_count()} маршрутов, оценка {current.score:.3f}, Pareto={len(self.archive.items)}")
+        return TNDPResult(network, current, history, self.archive.items.copy())
 
     def _local_search(self, network: RouteSet, current: Evaluation, history: list[dict]):
         if self._graph is None or not network.routes: return network, current
@@ -142,32 +157,6 @@ class TNDPOptimizer:
             history.append({"phase": "local_search", "round": round_no, "routes": network.route_count(), "score": current.score,
                             "operation": best_meta.get("operation"), "index": best_meta.get("index"),
                             "new_route": list(best_meta["route"].nodes), "frequency_vph": float(best_meta["route"].frequency_vph),
-                            "vehicle_type": best_meta["route"].vehicle_type, "feasible": current.metadata.get("feasible", True)})
+                            "vehicle_type": best_meta["route"].vehicle_type, "feasible": current.metadata.get("feasible", True), "pareto_size": len(self.archive.items)})
             self._notify(f"  улучшение: {current.score:.3f}")
         return network, current
-
-
-def surrogate_evaluator(demand, node_xy_km, route_set: RouteSet, config: NetworkDesignConfig | None = None, *args, **kwargs) -> Evaluation:
-    import numpy as np
-    from .vehicle_types import calculate_route_operations
-    config = config or NetworkDesignConfig(); matrix = np.asarray(demand, dtype=float); total = float(matrix.sum())
-    if not route_set.routes: return Evaluation(score=total * config.uncovered_demand_weight if total else 0.0, uncovered_demand=total, metadata={"evaluator": "surrogate", "empty_network": True})
-    route_km = 0.0; served = np.zeros(matrix.shape, dtype=bool); vehicle_cost = 0.0; annual_cost = 0.0; annual_amortization = 0.0; fleet = 0
-    for route in route_set.routes:
-        seq = np.asarray(route.nodes, dtype=int)
-        if len(seq) < 2: continue
-        xy = np.asarray(node_xy_km)[seq]; length = float(np.linalg.norm(xy[1:] - xy[:-1], axis=1).sum()); route_km += length
-        nodes = np.unique(seq)
-        if len(nodes): served[np.ix_(nodes, nodes)] = True
-        op = calculate_route_operations(route_length_km=length, max_section_flow_pph=max(route.max_section_flow_pph, 0.0), vehicle_type=route.vehicle_type,
-            speed_kmh=config.speed_kmh, interval_reserve_sec=config.interval_reserve_sec, terminal_delay_reserve=config.terminal_delay_reserve,
-            charging_min_per_terminal=config.charging_min_per_terminal, annual_days=config.annual_days, park_trip_coefficient=config.park_trip_coefficient, frequency_profile=config.frequency_profile)
-        annual_cost += float(op["annual_fleet_contract_cost_mln"]); annual_amortization += float(op["annual_fleet_amortization_mln"]); fleet += int(op["fleet"]); vehicle_cost += float(op["one_off_fleet_cost_mln"])
-    np.fill_diagonal(served, False); direct = float(matrix[served].sum()) if total else 0.0; uncovered = max(0.0, total - direct)
-    node_counts = {}
-    for route in route_set.routes:
-        for node in set(route.nodes): node_counts[node] = node_counts.get(node, 0) + 1
-    overlap = sum(max(0, c - 1) for c in node_counts.values())
-    score = uncovered * config.uncovered_demand_weight + route_km * config.operator_route_km_weight + overlap * config.duplication_weight + vehicle_cost * 0.001
-    return Evaluation(score=score, operator_cost=route_km, uncovered_demand=uncovered, direct_demand_share=direct / total if total else 0.0,
-        metadata={"evaluator": "surrogate", "fleet": fleet, "annual_contract_cost_mln": annual_cost, "annual_amortization_mln": annual_amortization})
