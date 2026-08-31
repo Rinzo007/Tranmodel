@@ -42,7 +42,7 @@ def _load_inputs():
     np.add.at(stop_demand, zone_to_stop, zones["production"].to_numpy(dtype=float) + zones["attraction"].to_numpy(dtype=float))
     stop_lonlat = stops.to_crs("EPSG:4326")
     stop_lonlat_xy = np.column_stack([stop_lonlat.geometry.x.to_numpy(dtype=float), stop_lonlat.geometry.y.to_numpy(dtype=float)])
-    return demand, zones, stops, stop_graph, stop_xy, zone_xy, zone_to_stop, stop_demand, stop_lonlat_xy, terminal_nodes
+    return demand, zones, stops, road_graph, stop_graph, stop_mapping, stop_xy, zone_xy, zone_to_stop, stop_demand, stop_lonlat_xy, terminal_nodes
 
 
 def _map_corridors_to_stops(corridors: list[DemandCorridor], zone_to_stop: np.ndarray) -> list[DemandCorridor]:
@@ -63,18 +63,17 @@ def _empty_evaluation(demand: np.ndarray, config: NetworkDesignConfig) -> Evalua
 
 
 def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool = True) -> dict:
-    """Synthesize a transit route network from independent zone OD demand."""
+    """Synthesize a transit route network from independent transport-zone OD demand."""
     config = config or NetworkDesignConfig()
     config.validate()
-    zone_od_dir = CACHE_DIR / "zone_od"
-    if not (zone_od_dir / "od_matrix.parquet").exists():
+    if not (CACHE_DIR / "zone_od" / "od_matrix.parquet").exists():
         run_zone_od(zone_size_m=750.0, force=False)
 
-    demand, zones, stops, graph, stop_xy, zone_xy, zone_to_stop, stop_demand, stop_lonlat_xy, terminal_nodes = _load_inputs()
+    demand, zones, stops, road_graph, stop_graph, stop_mapping, stop_xy, zone_xy, zone_to_stop, stop_demand, stop_lonlat_xy, terminal_nodes = _load_inputs()
     zone_corridors = extract_demand_corridors(demand, zone_xy, top_pairs=config.corridor_top_pairs,
                                                max_distance_km=config.corridor_distance_km)
     corridors = _map_corridors_to_stops(zone_corridors, zone_to_stop)
-    candidates = generate_route_candidates(corridors, graph, stop_xy, node_ids=list(range(len(stops))),
+    candidates = generate_route_candidates(corridors, stop_graph, stop_xy, node_ids=list(range(len(stops))),
                                            demand_vector=stop_demand, terminal_nodes=terminal_nodes, config=config)
     if not candidates:
         raise RuntimeError("TNDP generated no feasible route candidates")
@@ -90,10 +89,11 @@ def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool
     else:
         evaluator = lambda route_set: surrogate_evaluator(demand, zone_xy, route_set, config, zone_to_stop)
 
-    result = TNDPOptimizer(shortlist, evaluator, config).solve(graph=graph)
+    result = TNDPOptimizer(shortlist, evaluator, config).solve(graph=stop_graph)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     route_path = save_route_set(result.routes, OUTPUT_DIR / "generated_routes.json")
-    geojson_path = routes_to_geojson(result.routes, stops, OUTPUT_DIR / "generated_routes.geojson")
+    geojson_path = routes_to_geojson(result.routes, stops, OUTPUT_DIR / "generated_routes.geojson",
+                                     road_graph=road_graph, stop_to_road_node=stop_mapping)
     (OUTPUT_DIR / "history.json").write_text(json.dumps(result.history, ensure_ascii=False, indent=2), encoding="utf-8")
 
     ev = result.evaluation
@@ -116,13 +116,14 @@ def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool
         "# TNDP — синтез маршрутной сети", "",
         f"- Транспортных зон: **{report['n_zones']:,}**",
         f"- Остановок ОТ: **{report['n_stops']:,}**",
-        f"- OD-коридоров: **{report['n_corridors']:,}**",
+        f"- Коридоров OD: **{report['n_corridors']:,}**",
         f"- Кандидатных маршрутов: **{report['n_candidates']:,}**",
         f"- Итоговых маршрутов: **{report['n_routes']:,}**",
-        f"- Обслужено спроса: **{report['direct_demand_share'] * 100:.1f}%**",
+        f"- Доля обслуженного спроса: **{report['direct_demand_share'] * 100:.1f}%**",
         f"- Средние пересадки: **{report['transfers']:.2f}**",
+        f"- Пользовательская стоимость: **{report['user_cost']:.2f}",
         f"- Суммарная длина: **{report['operator_route_km']:.1f} км**",
         f"- Оценщик: **{report['evaluator']}**", "",
-        "OD задаётся между полигонами транспортных зон; маршруты строятся по реальному дорожному графу и проходят через реальные остановки ОТ.",
+        "OD задаётся между полигонами транспортных зон. Маршруты привязаны к реальным остановкам и экспортируются вдоль дорожного графа.",
     ]), encoding="utf-8")
     return report
