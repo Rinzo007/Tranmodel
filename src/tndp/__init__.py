@@ -9,6 +9,8 @@ from .corridors import DemandCorridor, extract_demand_corridors
 from .candidates import generate_route_candidates
 from .optimizer import TNDPOptimizer, TNDPResult
 from .aequilibrae_eval import AequilibraEEvaluationError, evaluate_route_set_aequilibrae
+from .pareto import ObjectiveVector, dominates, pareto_front, vector_from_evaluation
+from .service_indicators import ServiceIndicators, safe_share, capacity_excess
 
 __all__ = [
     "NetworkDesignConfig",
@@ -21,4 +23,11 @@ __all__ = [
     "TNDPResult",
     "AequilibraEEvaluationError",
     "evaluate_route_set_aequilibrae",
+    "ObjectiveVector",
+    "dominates",
+    "pareto_front",
+    "vector_from_evaluation",
+    "ServiceIndicators",
+    "safe_share",
+    "capacity_excess",
 ]
