@@ -1,26 +1,46 @@
 # AequilibraE backend
 
-Ветка `aequilibrae-migration` добавляет AequilibraE как вычислительное ядро модели.
+Ветка `aequilibrae-migration` использует AequilibraE как вычислительное ядро транспортной модели.
 
-## Что изменено
+## Контур модели
 
-Существующие OSM/WorldPop этапы подготовки данных сохраняются. Новый модуль `src/aequilibrae_pipeline.py` заменяет самописный расчёт сетевой стоимости, гравитационное распределение с Furness и сетевое назначение на соответствующие средства AequilibraE:
+`OSM PBF → OSM layers → WorldPop/POI demand → AequilibraE project → network skims → EXPO gravity/IPF → road BFW/BPR + PT Optimal Strategies`
 
-`OSM PBF → OSM layers → WorldPop/POI demand → AequilibraE project → network skims → EXPO gravity/IPF → BPR/BFW assignment`
+## Исходная маршрутная сеть
 
-Эталонная маршрутная сеть Воронежа теперь хранится непосредственно в репозитории:
+Файл `voronezh_routes_terminals.geojson` хранится непосредственно в репозитории. Он содержит точки остановок, принадлежность остановок к маршрутам (`routes`), признак конечной остановки (`is_terminal`) и число маршрутов (`route_count`). `phase1_real` использует его как источник остановок, а `phase3_real` — как источник существующей маршрутной сети.
 
-`voronezh_routes_terminals.geojson`
+## Общественный транспорт
 
-Файл содержит точки остановок и их принадлежность к маршрутам (`routes`), признак конечной остановки (`is_terminal`) и число маршрутов (`route_count`). Он используется `phase1_real` для формирования зон спроса и `phase3_real` для построения эталонной маршрутной сети. Зависимость от локального пути вида `D:\...\voronezh_routes_terminals.geojson` устранена.
+`src/aequilibrae_transit.py` выполняет полноценную миграцию этой сети в модуль Public Transport AequilibraE:
 
-Основные результаты:
+`GeoJSON → упорядоченные остановки маршрутов → GTFS → public_transport.sqlite → TransitGraph → Optimal Strategies`
 
-- `data/cache/aequilibrae/project` — полноценный проект AequilibraE;
-- `data/cache/aequilibrae/gmns/nodes.csv` и `links.csv` — промежуточное представление GMNS;
-- `data/cache/aequilibrae/link_load.parquet` — результаты назначения на рёбра;
-- `data/cache/aequilibrae/convergence.parquet` — показатели сходимости;
-- `data/cache/aequilibrae/aequilibrae_report.json` и `data/report/aequilibrae_report.md` — отчёт.
+Маршруты получают исходные номера из GeoJSON, а каждое направление моделируется отдельным GTFS-потоком. Остановки, пересадки и пешеходные связи строятся средствами AequilibraE.
+
+Поскольку исходный GeoJSON не содержит расписаний, частот, календаря и времени движения, в GTFS явно заданы параметры модели:
+
+- интервал: 10 мин;
+- период работы: 06:00–23:00;
+- средняя скорость: 22 км/ч;
+- задержка на остановке: 20 с;
+- скорость пешего доступа: 4.5 км/ч;
+- максимальная длина коннектора зоны: 800 м.
+
+Эти значения являются допущениями модели и сохраняются в `data/cache/aequilibrae/transit/transit_report.json`.
+
+Матрица корреспонденций, полученная AequilibraE EXPO/IPF, используется повторно для назначения спроса на общественный транспорт. Назначение выполняется алгоритмом **Optimal Strategies (Spiess & Florian)**.
+
+## Основные результаты
+
+- `data/cache/aequilibrae/project` — проект AequilibraE;
+- `data/cache/aequilibrae/gmns/nodes.csv` и `links.csv` — GMNS-представление дорожной сети;
+- `data/cache/aequilibrae/link_load.parquet` — загрузка дорожных рёбер;
+- `data/cache/aequilibrae/convergence.parquet` — сходимость дорожного назначения;
+- `data/cache/aequilibrae/transit/voronezh_reference_gtfs.zip` — сгенерированный GTFS;
+- `data/cache/aequilibrae/transit/transit_link_load.parquet` — загрузка рёбер общественного транспорта;
+- `data/cache/aequilibrae/transit/transit_report.json` — отчёт назначения ОТ;
+- `data/report/transit_report.md` — человекочитаемый отчёт.
 
 ## Запуск
 
@@ -28,15 +48,17 @@
 
 ```powershell
 pip install -r requirements.txt
-python -m src.aequilibrae_pipeline
+python -c "from src.aequilibrae_full import run_full_model; print(run_full_model(force=True))"
 ```
 
-Для принудительной пересборки проекта:
+Либо через Streamlit:
 
 ```powershell
-python -c "from src.aequilibrae_pipeline import run_all; run_all(force=True)"
+streamlit run app.py
 ```
 
-## Важное отличие от старого ядра
+В разделе **AequilibraE** кнопка «Запустить полный расчёт» выполняет построение проекта, распределение спроса, дорожное назначение и назначение пассажиропотока на реальную маршрутную сеть.
 
-AequilibraE выполняет сетевое назначение транспортного спроса на дорожный граф. Старый код `phase3_real.py` хранит существующую маршрутную сеть общественного транспорта, но для полноценного назначения именно на общественный транспорт потребуются расписание/частоты, времена ожидания, пересадки и транспортные режимы. Поэтому на первом этапе AequilibraE используется как вычислительное ядро дорожной сети и распределения спроса, а `voronezh_routes_terminals.geojson` используется как эталон существующей маршрутной сети для последующей миграции.
+## Техническое ограничение
+
+Для детального прогнозирования пассажиропотока на уровне расписаний желательно заменить модельные допущения реальным GTFS/расписанием: частоты по маршрутам и времени суток, время движения между остановками, календарь, тарифы и типы подвижного состава. Текущая реализация не придумывает эти данные внутри GeoJSON и хранит их как явные параметры модели.
