@@ -32,7 +32,6 @@ AEQ_DIR = CACHE_DIR / "aequilibrae"
 GMNS_DIR = AEQ_DIR / "gmns"
 PROJECT_DIR = AEQ_DIR / "project"
 
-# Old model used exp(-distance / 5.5 km).  We use network travel time instead.
 DECAY_RADIUS_KM = 5.5
 REFERENCE_SPEED_KMH = 25.0
 EXPONENTIAL_BETA = 1.0 / (DECAY_RADIUS_KM / REFERENCE_SPEED_KMH * 60.0)
@@ -99,22 +98,7 @@ def _direction(oneway) -> int:
     return 0
 
 
-def _explode_lines(roads: gpd.GeoDataFrame) -> list[LineString]:
-    lines: list[LineString] = []
-    for geom in roads.geometry:
-        if geom is None or geom.is_empty:
-            continue
-        if geom.geom_type == "LineString":
-            if len(geom.coords) >= 2:
-                lines.append(geom)
-        elif geom.geom_type == "MultiLineString":
-            lines.extend(x for x in geom.geoms if len(x.coords) >= 2)
-    return lines
-
-
 def _node_key(x: float, y: float) -> tuple[float, float]:
-    # OSM coordinates normally match exactly; rounding also prevents tiny
-    # floating-point differences from producing disconnected duplicate nodes.
     return round(float(x), 7), round(float(y), 7)
 
 
@@ -143,25 +127,27 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, stops: gpd.GeoDataFrame) -> tuple[pd.
         return nid
 
     next_link = 1
+    default_series = lambda: pd.Series(index=roads.index, dtype=object)
     for geom, highway, maxspeed, oneway, lanes, name in zip(
         roads.geometry,
-        roads.get("highway", pd.Series(index=roads.index, dtype=object)),
-        roads.get("maxspeed", pd.Series(index=roads.index, dtype=object)),
-        roads.get("oneway", pd.Series(index=roads.index, dtype=object)),
-        roads.get("lanes", pd.Series(index=roads.index, dtype=object)),
-        roads.get("name", pd.Series(index=roads.index, dtype=object)),
+        roads.get("highway", default_series()),
+        roads.get("maxspeed", default_series()),
+        roads.get("oneway", default_series()),
+        roads.get("lanes", default_series()),
+        roads.get("name", default_series()),
     ):
-        if geom is None or geom.is_empty:
-            continue
-        if geom.geom_type != "LineString" or len(geom.coords) < 2:
+        if geom is None or geom.is_empty or geom.geom_type != "LineString":
             continue
         pts = list(geom.coords)
         for a, b in zip(pts[:-1], pts[1:]):
             if a[:2] == b[:2]:
                 continue
+            d = _direction(oneway)
+            if d == -1:
+                a, b = b, a
+                d = 1
             a_id = node_id(a[0], a[1])
             b_id = node_id(b[0], b[1])
-            d = _direction(oneway)
             speed = _parse_speed(maxspeed, highway)
             lane_count = DEFAULT_LANES
             try:
@@ -172,31 +158,27 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, stops: gpd.GeoDataFrame) -> tuple[pd.
                 "link_id": next_link,
                 "from_node_id": a_id,
                 "to_node_id": b_id,
-                "direction": 1 if d == -1 else d,
+                "direction": d,
                 "length": float(LineString([a, b]).length),
                 "speed": speed,
                 "capacity": lane_count * CAPACITY_PER_LANE,
                 "lanes": lane_count,
                 "link_type": str(highway or "unclassified"),
                 "name": "" if pd.isna(name) else str(name),
-                "modes": "car",
-                "geometry": LineString([a, b]).wkt if d != -1 else LineString([b, a]).wkt,
+                "modes": "c",
+                "geometry": LineString([a, b]).wkt,
             })
             next_link += 1
 
-    # Demand stops become centroids.  Keep their IDs separate from physical nodes.
-    centroid_rows: list[dict] = []
     centroid_start = 9_000_000_000
-    stops = stops.reset_index(drop=True)
-    for pos, row in stops.iterrows():
+    for pos, row in stops.reset_index(drop=True).iterrows():
         geom = row.geometry
-        centroid_rows.append({
+        node_rows.append({
             "node_id": centroid_start + pos,
             "node_type": "centroid",
             "x_coord": float(geom.x),
             "y_coord": float(geom.y),
         })
-    node_rows.extend(centroid_rows)
 
     return pd.DataFrame(node_rows), pd.DataFrame(link_rows)
 
@@ -241,16 +223,12 @@ def build_project(force: bool = False) -> Path:
             node_file_path=str(node_path),
             srid=4326,
         )
-
-        # Connect every demand centroid to the nearest car node. AequilibraE
-        # then handles centroid connectors and centroid-aware shortest paths.
         centroid_ids = nodes.loc[nodes["node_type"] == "centroid", "node_id"].astype(int)
         for cid in centroid_ids:
             node = project.network.nodes.get(int(cid))
             try:
                 node.connect_mode("c", connectors=1, limit_to_zone=False)
             except TypeError:
-                # Compatibility fallback for older AequilibraE releases.
                 node.connect_mode("c", connectors=1)
         project.network.nodes.save()
         project.network.links.save()
@@ -277,7 +255,9 @@ def run_skimming(project) -> object:
     skm = NetworkSkimming(graph)
     skm.execute()
     if skm.report:
-        raise AequilibraEPipelineError("AequilibraE skimming failed: " + "; ".join(map(str, skm.report)))
+        raise AequilibraEPipelineError(
+            "AequilibraE skimming failed: " + "; ".join(map(str, skm.report))
+        )
     skm.save_to_project("network_skims", "omx")
     return skm.results.skims
 
@@ -289,8 +269,7 @@ def run_gravity(project, impedance) -> tuple[object, pd.DataFrame]:
     impedance.computational_view(["free_flow_time"])
     zone_ids = np.asarray(impedance.index, dtype=np.int64)
 
-    stops = gpd.read_parquet(CACHE_DIR / "phase1_real" / "stops_demand.parquet")
-    stops = stops.reset_index(drop=True)
+    stops = gpd.read_parquet(CACHE_DIR / "phase1_real" / "stops_demand.parquet").reset_index(drop=True)
     centroid_ids = 9_000_000_000 + np.arange(len(stops), dtype=np.int64)
     vectors = pd.DataFrame(
         {
@@ -364,13 +343,12 @@ def run_all(force: bool = False) -> dict:
         demand, vectors = run_gravity(project, skim)
         load, convergence = run_assignment(project, demand)
 
-        out_dir = AEQ_DIR
-        out_dir.mkdir(parents=True, exist_ok=True)
-        load.to_parquet(out_dir / "link_load.parquet", index=False)
-        convergence.to_parquet(out_dir / "convergence.parquet", index=False)
+        AEQ_DIR.mkdir(parents=True, exist_ok=True)
+        load.to_parquet(AEQ_DIR / "link_load.parquet", index=False)
+        convergence.to_parquet(AEQ_DIR / "convergence.parquet", index=False)
 
         report = {
-            "backend": "AequilibraE 1.7.x",
+            "backend": "AequilibraE 1.7.0",
             "project": str(project_path),
             "n_centroids": int(project.network.count_centroids()),
             "n_nodes": int(project.network.count_nodes()),
@@ -386,7 +364,7 @@ def run_all(force: bool = False) -> dict:
             "reference_decay_radius_km": DECAY_RADIUS_KM,
             "assignment": {"vdf": "BPR", "algorithm": "bfw", "rgap_target": 0.001},
         }
-        (out_dir / "aequilibrae_report.json").write_text(
+        (AEQ_DIR / "aequilibrae_report.json").write_text(
             json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         (REPORT_DIR / "aequilibrae_report.md").write_text(
