@@ -27,6 +27,19 @@ def show_map(m: folium.Map, height: int = 600):
     html(m._repr_html_(), height=height, width=None)
 
 
+def prepare_demand(zone_size_m: float = 750.0, force: bool = False):
+    """Prepare the complete zone-based demand chain for the UI."""
+    from src.phase1_real import run_phase1_real
+    from src.zones import build_transport_zones
+    from src.zone_od import run_zone_od
+
+    # phase1_real is retained only as a data-ingestion stage: it produces
+    # WorldPop cells and POI jobs. Zones themselves remain independent of stops.
+    run_phase1_real(force=force)
+    build_transport_zones(size_m=zone_size_m, force=force)
+    return run_zone_od(zone_size_m=zone_size_m, force=force)
+
+
 st.sidebar.title("Tranmodel")
 st.sidebar.caption("Воронеж · OSM + WorldPop + AequilibraE + TNDP")
 section = st.sidebar.radio("Раздел", [
@@ -53,24 +66,34 @@ if section == "Обзор":
     elif zo or zn:
         a, b, c = st.columns(3)
         a.metric("Транспортных зон", f"{(zn or {}).get('n_zones', 0):,}")
-        b.metric("Поездок", f"{(zo or {}).get('total_trips', 0):,.0f}")
+        a.metric("Поездок", f"{(zo or {}).get('total_trips', 0):,.0f}")
         c.metric("Среднее время", f"{(zo or {}).get('avg_network_time_min', 0):.1f} мин")
     else:
-        st.info("Сначала подготовьте данные спроса.")
+        st.info("Данные спроса ещё не подготовлены.")
+        st.caption("Нажмите кнопку ниже — приложение само подготовит WorldPop/POI → транспортные зоны → OD.")
+        zone_size = st.number_input("Размер транспортной зоны, м", 300, 2000, 750, step=50, key="overview_zone_size")
+        force = st.checkbox("Пересчитать существующие данные", key="overview_force")
+        if st.button("Подготовить данные спроса", type="primary"):
+            with st.spinner("Подготавливаем данные спроса, зоны и сетевую OD-матрицу..."):
+                try:
+                    result = prepare_demand(float(zone_size), bool(force))
+                    st.success("Данные спроса готовы. Теперь можно запускать синтез маршрутной сети.")
+                    st.json(result)
+                    st.cache_data.clear()
+                except Exception as exc:
+                    st.exception(exc)
 
 elif section == "Спрос":
     st.title("Спрос")
     rep = report("phase1_real/phase1_report.json")
     if rep:
         a, b, c = st.columns(3)
-        a.metric("Остановок", f"{rep['n_stops']:,}")
+        a.metric("Исходных остановок", f"{rep['n_stops']:,}")
         b.metric("Население", f"{rep['population_sum_by_stop']:,.0f}")
         c.metric("Рабочих мест", f"{rep['jobs_sum_by_stop']:,.0f}")
-        md = REPORT_DIR / "phase1_real_report.md"
-        if md.exists():
-            st.markdown(md.read_text(encoding="utf-8"))
+        st.info("Этот слой используется только для извлечения WorldPop/POI. Единицами OD являются транспортные зоны, а не остановки.")
     else:
-        st.info("Данные спроса ещё не рассчитаны.")
+        st.info("Данные ещё не подготовлены. Перейдите в «Обзор» и нажмите «Подготовить данные спроса».")
 
 elif section == "Транспортные зоны":
     st.title("Транспортные зоны")
@@ -82,10 +105,9 @@ elif section == "Транспортные зоны":
     size_m = a.number_input("Размер зоны, м", 300, 2000, 750, step=50)
     force = b.checkbox("Пересоздать зоны", value=False)
     if st.button("Построить зоны и OD", type="primary"):
-        with st.spinner("Строим зоны, коннекторы и сетевую OD-матрицу..."):
+        with st.spinner("Подготавливаем исходный спрос, зоны и сетевую OD-матрицу..."):
             try:
-                build_transport_zones(size_m=float(size_m), force=bool(force))
-                result = run_zone_od(zone_size_m=float(size_m), force=True)
+                result = prepare_demand(float(size_m), bool(force))
                 st.success("Зоны и OD-матрица построены.")
                 st.json(result)
                 st.cache_data.clear()
@@ -130,7 +152,7 @@ elif section == "Корреспонденции":
         if md.exists():
             st.markdown(md.read_text(encoding="utf-8"))
     else:
-        st.info("Постройте транспортные зоны и OD-матрицу в разделе «Транспортные зоны».")
+        st.info("Постройте транспортные зоны и OD-матрицу в разделе «Транспортные зоны» или через «Обзор».")
 
 elif section == "TNDP — Синтез маршрутов":
     st.title("TNDP — синтез маршрутной сети")
@@ -142,51 +164,61 @@ elif section == "TNDP — Синтез маршрутов":
     from src.tndp.model import NetworkDesignConfig
     from src.tndp.run import run_tndp
 
-    a, b, c, d, e = st.columns(5)
-    min_routes = a.number_input("Минимум маршрутов", 1, 200, 10)
-    max_routes = b.number_input("Максимум маршрутов", 1, 300, 30)
-    corridors = c.number_input("OD-коридоров", 10, 2000, 300)
-    candidates = d.number_input("Кандидатов/коридор", 1, 30, 8)
-    full = e.checkbox("Полная оценка AequilibraE", value=True)
-
-    if st.button("Синтезировать сеть", type="primary"):
-        if max_routes < min_routes:
-            st.error("Максимум маршрутов должен быть не меньше минимума.")
-        else:
-            cfg = NetworkDesignConfig(
-                min_routes=int(min_routes), max_routes=int(max_routes),
-                corridor_top_pairs=int(corridors), candidate_limit_per_corridor=int(candidates),
-                full_evaluation=bool(full),
-            )
-            with st.spinner("Генерируем и оцениваем маршрутные сети..."):
+    zo = report("zone_od/zone_od_report.json")
+    if not zo:
+        st.warning("OD-матрица ещё не подготовлена.")
+        if st.button("Подготовить данные спроса и продолжить", type="primary"):
+            with st.spinner("Подготавливаем данные спроса, зоны и OD-матрицу..."):
                 try:
-                    result = run_tndp(cfg, full_assignment=bool(full))
-                    st.success("Синтез завершён.")
-                    st.json(result)
-                    st.cache_data.clear()
+                    prepare_demand()
+                    st.success("OD-матрица готова. Теперь можно запускать синтез.")
+                    st.rerun()
                 except Exception as exc:
                     st.exception(exc)
-
-    rep = report("tndp/tndp_report.json")
-    if rep:
-        a, b, c, d, e = st.columns(5)
-        a.metric("Маршрутов", f"{rep.get('n_routes', 0):,}")
-        b.metric("Зон", f"{rep.get('n_zones', 0):,}")
-        c.metric("Коридоров", f"{rep.get('n_corridors', 0):,}")
-        d.metric("Обслужено", f"{rep.get('direct_demand_share', 0) * 100:.1f}%")
-        e.metric("Пересадки", f"{rep.get('transfers', 0):.2f}")
-        st.caption(f"Оценщик: {rep.get('evaluator', '—')}")
-        md = REPORT_DIR / "tndp_report.md"
-        if md.exists():
-            st.markdown(md.read_text(encoding="utf-8"))
-        route_path = Path(rep.get("route_set", ""))
-        if route_path.exists():
-            st.download_button("Скачать generated_routes.json", route_path.read_bytes(), "generated_routes.json")
-        geo_path = Path(rep.get("route_geojson", ""))
-        if geo_path.exists():
-            st.download_button("Скачать generated_routes.geojson", geo_path.read_bytes(), "generated_routes.geojson")
     else:
-        st.info("Синтез ещё не выполнялся.")
+        a, b, c, d, e = st.columns(5)
+        min_routes = a.number_input("Минимум маршрутов", 1, 200, 10)
+        max_routes = b.number_input("Максимум маршрутов", 1, 300, 30)
+        corridors = c.number_input("OD-коридоров", 10, 2000, 300)
+        candidates = d.number_input("Кандидатов/коридор", 1, 30, 8)
+        full = e.checkbox("Полная оценка AequilibraE", value=True)
+
+        if st.button("Синтезировать сеть", type="primary"):
+            if max_routes < min_routes:
+                st.error("Максимум маршрутов должен быть не меньше минимума.")
+            else:
+                cfg = NetworkDesignConfig(
+                    min_routes=int(min_routes), max_routes=int(max_routes),
+                    corridor_top_pairs=int(corridors), candidate_limit_per_corridor=int(candidates),
+                    full_evaluation=bool(full),
+                )
+                with st.spinner("Генерируем и оцениваем маршрутные сети..."):
+                    try:
+                        result = run_tndp(cfg, full_assignment=bool(full))
+                        st.success("Синтез завершён.")
+                        st.json(result)
+                        st.cache_data.clear()
+                    except Exception as exc:
+                        st.exception(exc)
+
+        rep = report("tndp/tndp_report.json")
+        if rep:
+            a, b, c, d, e = st.columns(5)
+            a.metric("Маршрутов", f"{rep.get('n_routes', 0):,}")
+            b.metric("Зон", f"{rep.get('n_zones', 0):,}")
+            c.metric("Коридоров", f"{rep.get('n_corridors', 0):,}")
+            d.metric("Обслужено", f"{rep.get('direct_demand_share', 0) * 100:.1f}%")
+            e.metric("Пересадки", f"{rep.get('transfers', 0):.2f}")
+            st.caption(f"Оценщик: {rep.get('evaluator', '—')}")
+            md = REPORT_DIR / "tndp_report.md"
+            if md.exists():
+                st.markdown(md.read_text(encoding="utf-8"))
+            route_path = Path(rep.get("route_set", ""))
+            if route_path.exists():
+                st.download_button("Скачать generated_routes.json", route_path.read_bytes(), "generated_routes.json")
+            geo_path = Path(rep.get("route_geojson", ""))
+            if geo_path.exists():
+                st.download_button("Скачать generated_routes.geojson", geo_path.read_bytes(), "generated_routes.geojson")
 
 elif section == "Benchmark":
     st.title("Benchmark TNDP")
