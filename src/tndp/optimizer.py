@@ -43,12 +43,14 @@ class TNDPOptimizer:
     def _record(self, network: RouteSet, ev: Evaluation) -> None:
         md = ev.metadata or {}
         coverage = float(md.get("coverage_share", md.get("coverage_800m", 0.0)) or 0.0)
+        annual_cost = float(md.get("annual_total_cost_mln", md.get("annual_operating_cost_mln", 0.0)) or 0.0)
+        peak_fleet = int(md.get("peak_fleet_reconciled", md.get("fleet", 0)) or 0)
         self.archive.add(compact_solution_record(
             score=ev.score, route_count=network.route_count(),
-            annual_cost_mln=float(md.get("annual_contract_cost_mln", 0.0) or 0.0),
-            uncovered_demand=float(ev.uncovered_demand), coverage_share=coverage,
-            user_cost=float(ev.user_cost), transfers=float(ev.transfers),
-            fleet=int(md.get("fleet", 0) or 0), metadata={"key": repr(self._key(network))}))
+            annual_cost_mln=annual_cost, uncovered_demand=float(ev.uncovered_demand),
+            coverage_share=coverage, user_cost=float(ev.user_cost),
+            transfers=float(ev.transfers), fleet=peak_fleet,
+            metadata={"key": repr(self._key(network)), "evaluator": md.get("evaluator", "unknown")}))
 
     def _evaluate(self, network: RouteSet, full: bool = True) -> Evaluation:
         cache = self._full_cache if full else self._fast_cache
@@ -63,7 +65,7 @@ class TNDPOptimizer:
         if self.progress: self.progress(message)
         print(f"[TNDP] {message}", flush=True)
 
-    def _rank_additions(self, network: RouteSet, remaining: list[Route]) -> list[tuple[float, RouteSet, Route]]:
+    def _rank_additions(self, network: RouteSet, remaining: list[Route]):
         ranked = []
         for idx, route in enumerate(remaining, 1):
             if network.contains_nodes(route.nodes): continue
@@ -73,7 +75,7 @@ class TNDPOptimizer:
         ranked.sort(key=lambda x: x[0])
         return ranked
 
-    def _construct_initial_beam(self) -> list[RouteSet]:
+    def _construct_initial_beam(self):
         states = [RouteSet()]
         target = min(self.config.min_routes, self.config.max_routes, len(self.candidates))
         for _ in range(target):
@@ -91,7 +93,7 @@ class TNDPOptimizer:
             states = list(unique.values())
         return states
 
-    def _screen_and_exact(self, trials: list[tuple[RouteSet, dict]], current: Evaluation):
+    def _screen_and_exact(self, trials, current):
         unique = {}
         for trial, meta in trials: unique.setdefault(self._key(trial), (trial, meta))
         ranked = sorted((self._evaluate(t, full=False).score, t, m) for t, m in unique.values())
@@ -110,7 +112,7 @@ class TNDPOptimizer:
         if not beam: raise RuntimeError("TNDP could not construct an initial route network")
         scored = [(n, self._evaluate(n, True)) for n in beam]
         network, current = min(scored, key=lambda x: x[1].score)
-        history = [{"phase": "start", "routes": network.route_count(), "score": current.score, "beam_width": len(beam)}]
+        history = [{"phase": "start", "routes": network.route_count(), "score": current.score, "beam_width": len(beam), "pareto_size": len(self.archive.items)}]
         self._notify(f"Старт точной оценки: {network.route_count()} маршрутов")
         stagnant = 0
         for iteration in range(self.config.iterations):
@@ -141,7 +143,7 @@ class TNDPOptimizer:
         self._notify(f"Завершено: {network.route_count()} маршрутов, оценка {current.score:.3f}, Pareto={len(self.archive.items)}")
         return TNDPResult(network, current, history, self.archive.items.copy())
 
-    def _local_search(self, network: RouteSet, current: Evaluation, history: list[dict]):
+    def _local_search(self, network: RouteSet, current: Evaluation, history):
         if self._graph is None or not network.routes: return network, current
         stagnant = 0
         for round_no in range(1, self.config.local_search_rounds + 1):
