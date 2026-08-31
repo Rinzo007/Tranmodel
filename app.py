@@ -12,12 +12,10 @@ from config import CACHE_DIR, REPORT_DIR
 
 st.set_page_config(page_title="Воронеж — транспортная модель", layout="wide")
 
-
 @st.cache_data(show_spinner=False)
 def load_json(path: str) -> dict | None:
     p = Path(path)
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
-
 
 def load_named_json(name: str) -> dict | None:
     for base in (CACHE_DIR, REPORT_DIR):
@@ -26,109 +24,86 @@ def load_named_json(name: str) -> dict | None:
             return load_json(str(p))
     return None
 
-
 def load_report_md(name: str) -> str:
     p = REPORT_DIR / name
     return p.read_text(encoding="utf-8") if p.exists() else "Отчёт не найден."
 
-
 def show_map(m: folium.Map, height: int = 560) -> None:
     html(m._repr_html_(), height=height, width=None)
 
-
 st.sidebar.title("Транспортная модель Воронежа")
-st.sidebar.caption("OSM + WorldPop + AequilibraE")
-phase = st.sidebar.radio(
-    "Раздел",
-    [
-        "Обзор",
-        "AequilibraE",
-        "Фаза 0 — Данные",
-        "Фаза 1 — Спрос",
-        "Фаза 2 — Корреспонденции",
-        "Фаза 3 — Маршруты",
-        "Фаза 4 — Пассажиропоток",
-    ],
-)
+st.sidebar.caption("OSM + WorldPop + AequilibraE + TNDP")
+phase = st.sidebar.radio("Раздел", [
+    "Обзор", "TNDP — Синтез маршрутов", "AequilibraE",
+    "Фаза 0 — Данные", "Фаза 1 — Спрос", "Фаза 2 — Корреспонденции",
+    "Фаза 3 — Маршруты", "Фаза 4 — Пассажиропоток",
+])
 
 if phase == "Обзор":
     st.title("Транспортная модель городского округа Воронеж")
-    st.markdown(
-        "Модель использует OSM и WorldPop для подготовки спроса. "
-        "Основной новый расчётный контур построен на AequilibraE: "
-        "сетевая стоимость, гравитационное распределение и назначение "
-        "автомобильного и общественного транспорта."
-    )
-    rep = load_named_json("aequilibrae/aequilibrae_report.json")
-    p0 = load_named_json("phase0_report.json")
-    p1 = load_named_json("phase1_real/phase1_report.json")
+    st.markdown("OSM + WorldPop формируют спрос, AequilibraE выполняет сетевые расчёты и назначение, TNDP синтезирует маршрутную сеть из OD.")
+    rep = load_named_json("tndp/tndp_report.json") or load_named_json("aequilibrae/aequilibrae_report.json")
     if rep:
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Центроидов", f"{rep['n_centroids']:,}")
-        c2.metric("Узлов", f"{rep['n_nodes']:,}")
-        c3.metric("Рёбер", f"{rep['n_links']:,}")
-        c4.metric("Матрица OD", f"{rep['total_demand']:,.0f}")
-        if rep.get("transit"):
-            st.success(
-                f"Общественный транспорт: {rep['transit']['n_routes']:,} маршрутов, "
-                f"{rep['transit']['assigned_link_rows']:,} загруженных рёбер."
-            )
-    elif p0 or p1:
-        c1, c2 = st.columns(2)
-        c1.metric("Население", f"{(p0 or {}).get('population', {}).get('total', 0):,.0f}")
-        c2.metric("Остановок", f"{(p1 or {}).get('n_stops', 0):,}")
-    st.info("Для нового расчёта откройте раздел «AequilibraE».")
+        c1.metric("Маршрутов", f"{rep.get('n_routes', 0):,}")
+        c2.metric("Кандидатов", f"{rep.get('n_candidates', rep.get('n_nodes', 0)):,}")
+        c3.metric("OD-коридоров", f"{rep.get('n_corridors', 0):,}")
+        c4.metric("Прямой спрос", f"{rep.get('direct_demand_share', 0) * 100:.1f}%")
+    st.info("Откройте «TNDP — Синтез маршрутов», чтобы построить новую сеть из матрицы корреспонденций.")
 
-elif phase == "AequilibraE":
-    st.title("AequilibraE — автомобиль + общественный транспорт")
-    st.write(
-        "Сначала строится дорожный граф, рассчитываются сетевые скримы и "
-        "гравитационная матрица EXPO/IPF. Затем та же матрица назначается "
-        "на дорожную сеть и на реальную маршрутную сеть из "
-        "voronezh_routes_terminals.geojson через GTFS/TransitGraph."
-    )
+elif phase == "TNDP — Синтез маршрутов":
+    st.title("TNDP — автоматический синтез маршрутной сети")
+    st.write("Алгоритм выделяет сильные OD-коридоры, строит кандидатные маршруты по дорожной сети и итеративно выбирает целые маршруты, улучшающие сеть.")
+    from src.tndp.model import NetworkDesignConfig
+    from src.tndp.run import run_tndp
 
-    from src.aequilibrae_full import TransitPipelineError, run_full_model
-    from src.aequilibrae_pipeline import AequilibraEPipelineError
-
-    c1, c2 = st.columns(2)
-    run_button = c1.button("Запустить полный расчёт", type="primary")
-    force = c2.checkbox("Пересобрать проект с нуля", value=False)
+    c1, c2, c3, c4 = st.columns(4)
+    min_routes = c1.number_input("Мин. маршрутов", 1, 200, 10)
+    max_routes = c2.number_input("Макс. маршрутов", 1, 300, 30)
+    corridors = c3.number_input("OD-коридоров", 10, 2000, 300)
+    candidates = c4.number_input("Кандидатов/коридор", 1, 30, 8)
+    run_button = st.button("Синтезировать маршрутную сеть", type="primary")
 
     if run_button:
-        with st.spinner("AequilibraE рассчитывает OD, дорожное назначение и пассажиропоток ОТ..."):
+        cfg = NetworkDesignConfig(
+            min_routes=int(min_routes), max_routes=int(max_routes),
+            corridor_top_pairs=int(corridors), candidate_limit_per_corridor=int(candidates),
+        )
+        with st.spinner("Строим коридоры, кандидатные маршруты и оптимизируем сеть..."):
             try:
-                report = run_full_model(force=force)
-                st.success("Полный расчёт AequilibraE завершён.")
+                report = run_tndp(cfg)
+                st.success("Синтез завершён.")
                 st.json(report)
                 st.cache_data.clear()
-            except (AequilibraEPipelineError, TransitPipelineError, FileNotFoundError, ValueError) as exc:
-                st.error(str(exc))
             except Exception as exc:
                 st.exception(exc)
 
+    report = load_named_json("tndp/tndp_report.json")
+    if report:
+        st.markdown(load_report_md("tndp_report.md"))
+        route_path = Path(report["route_set"])
+        if route_path.exists():
+            st.download_button("Скачать набор маршрутов JSON", route_path.read_bytes(), "generated_routes.json", "application/json")
+    else:
+        st.info("Синтез ещё не выполнялся.")
+
+elif phase == "AequilibraE":
+    st.title("AequilibraE — расчётное ядро")
+    st.write("Используется для сетевых скримов, распределения спроса и назначения общественного транспорта.")
+    from src.aequilibrae_full import run_full_model
+    force = st.checkbox("Пересобрать проект с нуля", value=False)
+    if st.button("Запустить полный расчёт AequilibraE", type="primary"):
+        with st.spinner("AequilibraE выполняет расчёт..."):
+            try:
+                report = run_full_model(force=force)
+                st.success("Расчёт завершён.")
+                st.json(report)
+                st.cache_data.clear()
+            except Exception as exc:
+                st.exception(exc)
     report = load_named_json("aequilibrae/aequilibrae_report.json")
     if report:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Центроидов", f"{report['n_centroids']:,}")
-        c2.metric("Узлов", f"{report['n_nodes']:,}")
-        c3.metric("Дорожных рёбер", f"{report['n_links']:,}")
-        c4.metric("Объём OD", f"{report['total_demand']:,.0f}")
-        if report.get("transit"):
-            tr = report["transit"]
-            st.subheader("Общественный транспорт")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Маршрутов", f"{tr['n_routes']:,}")
-            c2.metric("Остановок", f"{tr['n_stops']:,}")
-            c3.metric("Рёбер маршрутов", f"{tr['n_route_links']:,}")
-            c4.metric("Назначенных рёбер", f"{tr['assigned_link_rows']:,}")
         st.markdown(load_report_md("aequilibrae_report.md"))
-        st.caption(
-            f"Проект AequilibraE: `{report['project']}`. "
-            "Его можно открыть средствами AequilibraE/QGIS."
-        )
-        if report.get("transit"):
-            st.markdown(load_report_md("transit_report.md"))
     else:
         st.info("Расчёт ещё не выполнялся.")
 
@@ -153,25 +128,10 @@ elif phase == "Фаза 1 — Спрос":
         c2.metric("Население приписано", f"{rep['population_sum_by_stop']:,.0f}")
         c3.metric("Рабочих мест", f"{rep['jobs_sum_by_stop']:,.0f}")
     st.markdown(load_report_md("phase1_real_report.md"))
-    stops_path = CACHE_DIR / "phase1_real" / "stops_demand.parquet"
-    if stops_path.exists():
-        stops = gpd.read_parquet(stops_path).to_crs("EPSG:4326")
-        m = folium.Map(location=[51.66, 39.20], zoom_start=11, tiles="CartoDB positron")
-        for _, s in stops.iterrows():
-            p = s.geometry.centroid
-            folium.CircleMarker(
-                location=[p.y, p.x],
-                radius=4,
-                fill=True,
-                fillOpacity=0.5,
-                popup=f"pop={s['population']:.0f} jobs={s['jobs']:.0f}",
-            ).add_to(m)
-        show_map(m)
 
 elif phase == "Фаза 2 — Корреспонденции":
-    st.title("Фаза 2 — Корреспонденции")
-    st.caption("Новое распределение выполняется средствами AequilibraE; старый этап оставлен для сравнения.")
-    rep = load_named_json("phase2/phase2_report.json") or load_named_json("phase2_report.json")
+    st.title("Фаза 2 — Матрица корреспонденций")
+    rep = load_named_json("phase2/phase2_report.json")
     if rep:
         c1, c2, c3 = st.columns(3)
         c1.metric("Поездок", f"{rep.get('total_trips', 0):,.0f}")
@@ -180,9 +140,8 @@ elif phase == "Фаза 2 — Корреспонденции":
     st.markdown(load_report_md("phase2_report.md"))
 
 elif phase == "Фаза 3 — Маршруты":
-    st.title("Фаза 3 — Реальная маршрутная сеть")
-    st.caption("Маршруты и остановки берутся из voronezh_routes_terminals.geojson и импортируются в AequilibraE как GTFS."
-               " Расписание/интервал задаются отдельными параметрами модели, поскольку их нет в GeoJSON.")
+    st.title("Фаза 3 — Маршруты")
+    st.caption("Этот раздел показывает существующую маршрутную сеть из voronezh_routes_terminals.geojson. Для генерации новой сети используйте TNDP.")
     rep = load_named_json("phase3_real/phase3_report.json")
     if rep:
         c1, c2, c3 = st.columns(3)
@@ -190,14 +149,9 @@ elif phase == "Фаза 3 — Маршруты":
         c2.metric("Остановок охвачено", f"{rep.get('n_stops_served', 0)}")
         c3.metric("Суммарная длина", f"{rep.get('total_route_km_air', 0)} км")
     st.markdown(load_report_md("phase3_real_report.md"))
-    tr = load_named_json("aequilibrae/transit/transit_report.json")
-    if tr:
-        st.subheader("Миграция в AequilibraE Transit")
-        st.json(tr)
 
 elif phase == "Фаза 4 — Пассажиропоток":
     st.title("Фаза 4 — Пассажиропоток")
-    st.caption("Новый пассажиропоток общественного транспорта рассчитывается AequilibraE Optimal Strategies.")
     tr = load_named_json("aequilibrae/transit/transit_report.json")
     if tr:
         c1, c2, c3, c4 = st.columns(4)
@@ -207,11 +161,4 @@ elif phase == "Фаза 4 — Пассажиропоток":
         c4.metric("Загруженных рёбер", f"{tr['assigned_link_rows']:,}")
         st.markdown(load_report_md("transit_report.md"))
     else:
-        rep = load_named_json("phase4/phase4_report.json")
-        if rep:
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Распределено поездок", f"{rep['assigned_trips']:,.0f}")
-            c2.metric("Макс. загрузка", f"{rep['max_segment_load']:,.0f}")
-            c3.metric("Коэфф. заполнения", f"{rep['avg_load_factor']:.2f}")
-            c4.metric("Средние пересадки", f"{rep['avg_transfers']:.2f}")
-        st.markdown(load_report_md("phase4_report.md"))
+        st.info("Сначала выполните расчёт AequilibraE.")
