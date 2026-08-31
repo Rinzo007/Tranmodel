@@ -11,7 +11,9 @@ from .service_metrics import ServiceMetrics, generalized_cost
 from .interval_profile import IntervalPeriod, DEFAULT_INTERVAL_PROFILE, daily_frequency_factor, as_frequency_profile, validate_profile
 from .multi_period import PeriodPlan, build_period_plan, summarize_period_plan
 from .operating_plan import build_network_operating_plan
-from .operating_costs import annual_route_costs
+from .period_assignment import PeriodDemand, PeriodAssignment, build_period_demands, aggregate_period_assignments
+from .period_costs import route_period_costs
+from .cost_aggregation import aggregate_route_costs, aggregate_network_costs
 
 __all__ = [
     "NetworkDesignConfig", "Route", "RouteSet", "Evaluation", "DemandCorridor",
@@ -22,5 +24,6 @@ __all__ = [
     "ServiceMetrics", "generalized_cost", "IntervalPeriod", "DEFAULT_INTERVAL_PROFILE",
     "daily_frequency_factor", "as_frequency_profile", "validate_profile",
     "PeriodPlan", "build_period_plan", "summarize_period_plan", "build_network_operating_plan",
-    "annual_route_costs",
+    "PeriodDemand", "PeriodAssignment", "build_period_demands", "aggregate_period_assignments",
+    "route_period_costs", "aggregate_route_costs", "aggregate_network_costs",
 ]
