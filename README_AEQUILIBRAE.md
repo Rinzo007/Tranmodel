@@ -1,64 +1,71 @@
-# AequilibraE backend
+# AequilibraE + TNDP backend
 
-Ветка `aequilibrae-migration` использует AequilibraE как вычислительное ядро транспортной модели.
+Ветка `aequilibrae-migration` использует AequilibraE как расчётное ядро, а TNDP — как слой синтеза маршрутной сети из матрицы корреспонденций.
 
-## Контур модели
+## Главный контур модели
 
-`OSM PBF → OSM layers → WorldPop/POI demand → AequilibraE project → network skims → EXPO gravity/IPF → road BFW/BPR + PT Optimal Strategies`
+`OSM PBF → OSM/WorldPop/POI → OD matrix → demand corridors → candidate routes → TNDP optimization → AequilibraE Transit Assignment → passenger flows`
 
-## Исходная маршрутная сеть
+## TNDP — синтез маршрутов
 
-Файл `voronezh_routes_terminals.geojson` хранится непосредственно в репозитории. Он содержит точки остановок, принадлежность остановок к маршрутам (`routes`), признак конечной остановки (`is_terminal`) и число маршрутов (`route_count`). `phase1_real` использует его как источник остановок, а `phase3_real` — как источник существующей маршрутной сети.
+Новый пакет `src/tndp/` решает задачу проектирования маршрутной сети на основе OD:
 
-## Общественный транспорт
+- `model.py` — маршруты, набор маршрутов и ограничения;
+- `corridors.py` — выделение сильных OD-коридоров;
+- `network.py` — построение дорожного графа и компактного графа остановок;
+- `candidates.py` — генерация целых кандидатных маршрутов по кратчайшим сетевым путям и через терминалы;
+- `optimizer.py` — итеративный отбор маршрутов и локальная замена маршрутов;
+- `io.py` — чтение текущей матрицы OD и экспорт решения;
+- `run.py` — запуск полного синтеза;
+- `benchmark.py` — адаптер формата RenatoArbex/TransitNetworkDesign;
+- `cli.py` — запуск из PowerShell/терминала.
 
-`src/aequilibrae_transit.py` выполняет полноценную миграцию этой сети в модуль Public Transport AequilibraE:
+Важно: это уже не старый stop-by-stop greedy из `phase3.py`. Оптимизируются целые маршруты относительно всей сети. Текущий оценщик — быстрый суррогат для скрининга кандидатов; архитектура оценщика отделена от генератора, чтобы заменить его полноценным AequilibraE Transit Assignment.
 
-`GeoJSON → упорядоченные остановки маршрутов → GTFS → public_transport.sqlite → TransitGraph → Optimal Strategies`
+### Запуск TNDP
 
-Маршруты получают исходные номера из GeoJSON, а каждое направление моделируется отдельным GTFS-потоком. Остановки, пересадки и пешеходные связи строятся средствами AequilibraE.
+После создания `data/cache/phase2/matrix_od.parquet` и `data/cache/phase2/stops_matrix.parquet`:
 
-Поскольку исходный GeoJSON не содержит расписаний, частот, календаря и времени движения, в GTFS явно заданы параметры модели:
+```powershell
+python -m src.tndp.cli --min-routes 10 --max-routes 30 --corridors 300 --candidates-per-corridor 8
+```
 
-- интервал: 10 мин;
-- период работы: 06:00–23:00;
-- средняя скорость: 22 км/ч;
-- задержка на остановке: 20 с;
-- скорость пешего доступа: 4.5 км/ч;
-- максимальная длина коннектора зоны: 800 м.
+Результаты:
 
-Эти значения являются допущениями модели и сохраняются в `data/cache/aequilibrae/transit/transit_report.json`.
+- `data/cache/tndp/generated_routes.json` — сгенерированный набор маршрутов;
+- `data/cache/tndp/history.json` — история улучшений;
+- `data/cache/tndp/tndp_report.json` — метрики;
+- `data/report/tndp_report.md` — отчёт.
 
-Матрица корреспонденций, полученная AequilibraE EXPO/IPF, используется повторно для назначения спроса на общественный транспорт. Назначение выполняется алгоритмом **Optimal Strategies (Spiess & Florian)**.
+Streamlit предоставляет раздел **TNDP — Синтез маршрутов**.
 
-## Основные результаты
+## Источник существующей сети
 
-- `data/cache/aequilibrae/project` — проект AequilibraE;
-- `data/cache/aequilibrae/gmns/nodes.csv` и `links.csv` — GMNS-представление дорожной сети;
-- `data/cache/aequilibrae/link_load.parquet` — загрузка дорожных рёбер;
-- `data/cache/aequilibrae/convergence.parquet` — сходимость дорожного назначения;
-- `data/cache/aequilibrae/transit/voronezh_reference_gtfs.zip` — сгенерированный GTFS;
-- `data/cache/aequilibrae/transit/transit_link_load.parquet` — загрузка рёбер общественного транспорта;
-- `data/cache/aequilibrae/transit/transit_report.json` — отчёт назначения ОТ;
-- `data/report/transit_report.md` — человекочитаемый отчёт.
+`voronezh_routes_terminals.geojson` хранится непосредственно в репозитории. Он содержит точки остановок, принадлежность остановок к маршрутам (`routes`), признак конечной остановки (`is_terminal`) и число маршрутов (`route_count`). Этот файл используется как эталон существующей сети и источник реальных ограничений остановочной сети, но не как готовое решение оптимизатора.
 
-## Запуск
+## AequilibraE и общественный транспорт
 
-После подготовки OSM/WorldPop слоёв:
+`src/aequilibrae_transit.py` выполняет миграцию заданной маршрутной сети в Public Transport AequilibraE:
+
+`GeoJSON → GTFS → public_transport.sqlite → TransitGraph → Optimal Strategies`
+
+Для модельного запуска без реального GTFS заданы явные параметры: интервал 10 мин, работа 06:00–23:00, скорость 22 км/ч, стоянка 20 с, скорость пешего доступа 4.5 км/ч. Они являются допущениями и сохраняются в отчёте.
+
+## Benchmark
+
+Для проверки алгоритма используется формат `RenatoArbex/TransitNetworkDesign`: узлы, связи, матрица спроса и опубликованные наборы маршрутов. Репозиторий содержит Mandl, Mumford и Rivera — сети разного размера и сложности, а также критерии сравнения решений. После проверки на benchmark-сетях TNDP-решатель переносится на Воронеж.
+
+## Запуск полного расчёта
 
 ```powershell
 pip install -r requirements.txt
-python -c "from src.aequilibrae_full import run_full_model; print(run_full_model(force=True))"
-```
-
-Либо через Streamlit:
-
-```powershell
 streamlit run app.py
 ```
 
-В разделе **AequilibraE** кнопка «Запустить полный расчёт» выполняет построение проекта, распределение спроса, дорожное назначение и назначение пассажиропотока на реальную маршрутную сеть.
+Для текущего полного контура AequilibraE:
 
-## Техническое ограничение
+```powershell
+python -c "from src.aequilibrae_full import run_full_model; print(run_full_model(force=True))"
+```
 
-Для детального прогнозирования пассажиропотока на уровне расписаний желательно заменить модельные допущения реальным GTFS/расписанием: частоты по маршрутам и времени суток, время движения между остановками, календарь, тарифы и типы подвижного состава. Текущая реализация не придумывает эти данные внутри GeoJSON и хранит их как явные параметры модели.
+Следующая стадия TNDP — заменить суррогатный оценщик в `src/tndp/run.py` на адаптер, который для каждого набора маршрутов строит TransitGraph AequilibraE, выполняет Optimal Strategies и возвращает пользовательские/эксплуатационные показатели. После этого частоты следует калибровать по максимальным загрузкам и итеративно пересчитывать назначение.
