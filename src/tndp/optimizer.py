@@ -1,4 +1,4 @@
-"""Whole-route TNDP optimizer with constructive search and local mutations."""
+"""Whole-route TNDP optimizer with construction, mutation and replacement search."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ Evaluator = Callable[[RouteSet], Evaluation]
 
 
 class TNDPOptimizer:
-    """Select whole routes, then improve them with local route mutations."""
+    """Construct a route set, then improve it with local whole-route moves."""
 
     def __init__(self, candidates: list[Route], evaluator: Evaluator,
                  config: NetworkDesignConfig | None = None) -> None:
@@ -40,17 +40,24 @@ class TNDPOptimizer:
         self.evaluator = evaluator
         self.config = config or NetworkDesignConfig()
         self.config.validate()
+        self._graph = None
 
-    @staticmethod
-    def _sorted_candidates(candidates: list[Route]) -> list[Route]:
-        return sorted(candidates, key=lambda r: (r.route_id or "", r.nodes))
+    def _evaluate(self, network: RouteSet) -> Evaluation:
+        return self.evaluator(network)
 
-    def solve(self, initial: RouteSet | None = None) -> TNDPResult:
+    def _candidate_score(self, route: Route, network: RouteSet) -> tuple[float, Evaluation]:
+        trial = network.copy()
+        trial.add(route)
+        ev = self._evaluate(trial)
+        return ev.score, ev
+
+    def solve(self, initial: RouteSet | None = None, graph=None) -> TNDPResult:
+        self._graph = graph
         network = initial.copy() if initial else RouteSet()
-        current = self.evaluator(network)
+        current = self._evaluate(network)
         history = [{"phase": "start", "routes": network.route_count(), "score": current.score}]
 
-        remaining = self._sorted_candidates(self.candidates)
+        remaining = [r for r in self.candidates if not network.contains_nodes(r.nodes)]
         for iteration in range(self.config.iterations):
             if network.route_count() >= self.config.max_routes:
                 break
@@ -60,9 +67,7 @@ class TNDPOptimizer:
             for route in remaining:
                 if network.contains_nodes(route.nodes):
                     continue
-                trial = network.copy()
-                trial.add(route)
-                ev = self.evaluator(trial)
+                _, ev = self._candidate_score(route, network)
                 if best_eval is None or ev.score < best_eval.score:
                     best_route, best_eval = route, ev
 
@@ -89,17 +94,23 @@ class TNDPOptimizer:
         return TNDPResult(network, current, history)
 
     def _local_search(self, network: RouteSet, current: Evaluation, history: list[dict]):
+        if self._graph is None or network.route_count() == 0:
+            return network, current
+
         for round_no in range(1, self.config.local_search_rounds + 1):
             best_network = network
             best_eval = current
             best_meta = None
+
             for trial, index, replacement in mutate_route_set(network, self._graph, self.config):
-                ev = self.evaluator(trial)
+                ev = self._evaluate(trial)
                 if ev.score + self.config.improvement_epsilon < best_eval.score:
                     best_network, best_eval = trial, ev
                     best_meta = (index, replacement)
+
             if best_meta is None:
                 break
+
             old = network.routes[best_meta[0]]
             network, current = best_network, best_eval
             history.append({
@@ -110,46 +121,41 @@ class TNDPOptimizer:
                 "replaced_route": list(old.nodes),
                 "new_route": list(best_meta[1].nodes),
             })
+
         return network, current
 
-    def solve_with_graph(self, graph, initial: RouteSet | None = None) -> TNDPResult:
-        """Solve while making the candidate road graph available to mutations."""
-        self._graph = graph
-        return self.solve(initial)
 
-
-def surrogate_evaluator(
-    demand,
-    node_xy_km,
-    route_set: RouteSet,
-    config: NetworkDesignConfig | None = None,
-) -> Evaluation:
-    """Fast screening evaluator based on direct demand, length and overlap."""
+def surrogate_evaluator(demand, node_xy_km, route_set: RouteSet,
+                        config: NetworkDesignConfig | None = None) -> Evaluation:
+    """Fast candidate-screening evaluator; final evaluation belongs to AequilibraE."""
     config = config or NetworkDesignConfig()
     import numpy as np
 
     matrix = np.asarray(demand, dtype=float)
+    total = float(matrix.sum())
+    if route_set.route_count() == 0:
+        return Evaluation(
+            score=total * config.uncovered_demand_weight if total else 0.0,
+            uncovered_demand=total,
+            metadata={"evaluator": "surrogate", "empty_network": True},
+        )
+
     served = np.zeros_like(matrix, dtype=bool)
     route_km = 0.0
-    covered_pairs = 0
     for route in route_set.routes:
         seq = route.nodes
-        node_set = set(seq)
-        route_km += float(sum(np.linalg.norm(node_xy_km[a] - node_xy_km[b]) for a, b in zip(seq[:-1], seq[1:])))
-        nodes = list(node_set)
+        route_km += float(sum(np.linalg.norm(node_xy_km[a] - node_xy_km[b])
+                              for a, b in zip(seq[:-1], seq[1:])))
+        nodes = list(set(seq))
         if nodes:
             served[np.ix_(nodes, nodes)] = True
     np.fill_diagonal(served, False)
 
-    total = float(matrix.sum())
     direct = float(matrix[served].sum()) if total else 0.0
     uncovered = max(0.0, total - direct)
-    overlap = sum(max(0, sum(1 for r in route_set.routes if node in r.nodes) - 1) for route in route_set.routes for node in set(route.nodes))
-    score = (
-        uncovered * config.uncovered_demand_weight
-        + route_km * config.operator_route_km_weight
-        + overlap * config.duplication_weight
-    )
+    overlap = sum(max(0, sum(1 for r in route_set.routes if node in r.nodes) - 1)
+                  for node in {n for r in route_set.routes for n in r.nodes})
+    score = uncovered * config.uncovered_demand_weight + route_km * config.operator_route_km_weight + overlap * config.duplication_weight
     return Evaluation(
         score=score,
         operator_cost=route_km,
