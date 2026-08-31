@@ -18,9 +18,20 @@ ROAD_SPEED_KMH = {
 }
 
 
-def build_tndp_graph(roads: gpd.GeoDataFrame) -> nx.Graph:
-    """Build the actual OSM road graph with travel time and length weights."""
-    graph = nx.Graph()
+def _oneway_direction(value) -> int:
+    if value is None:
+        return 0
+    text = str(value).strip().lower()
+    if text in {"yes", "true", "1"}:
+        return 1
+    if text == "-1":
+        return -1
+    return 0
+
+
+def build_tndp_graph(roads: gpd.GeoDataFrame) -> nx.DiGraph:
+    """Build a directed OSM road graph with real length and travel-time weights."""
+    graph = nx.DiGraph()
     projected = roads.to_crs(PROJ_EPSG).explode(index_parts=False, ignore_index=True)
     for _, row in projected.iterrows():
         geom = row.geometry
@@ -28,6 +39,7 @@ def build_tndp_graph(roads: gpd.GeoDataFrame) -> nx.Graph:
             continue
         lines = list(geom.geoms) if geom.geom_type == "MultiLineString" else [geom]
         speed = float(ROAD_SPEED_KMH.get(str(row.get("highway") or "").lower(), 30.0))
+        direction = _oneway_direction(row.get("oneway"))
         for line in lines:
             coords = list(line.coords)
             for a, b in zip(coords[:-1], coords[1:]):
@@ -38,8 +50,12 @@ def build_tndp_graph(roads: gpd.GeoDataFrame) -> nx.Graph:
                 length_km = float(np.hypot(a[0] - b[0], a[1] - b[1])) / 1000.0
                 time_min = length_km / speed * 60.0
                 attrs = {"time": time_min, "length_km": length_km}
+                if direction == -1:
+                    u, v = v, u
                 if not graph.has_edge(u, v) or time_min < graph[u][v]["time"]:
                     graph.add_edge(u, v, **attrs)
+                if direction == 0 and not graph.has_edge(v, u):
+                    graph.add_edge(v, u, **attrs)
     return graph
 
 
@@ -56,10 +72,10 @@ def snap_stops_to_graph(graph: nx.Graph, stops: gpd.GeoDataFrame):
     return graph, [nodes[int(i)] for i in indices], node_xy / 1000.0
 
 
-def add_stop_nodes(graph: nx.Graph, stop_to_road_node: list[tuple[float, float]], k_neighbors: int = 8) -> nx.Graph:
-    """Create a sparse stop graph whose edge costs come from real-road shortest paths."""
+def add_stop_nodes(graph: nx.Graph, stop_to_road_node: list[tuple[float, float]], k_neighbors: int = 8) -> nx.DiGraph:
+    """Create a directed stop graph whose costs come from real-road shortest paths."""
     n = len(stop_to_road_node)
-    out = nx.Graph()
+    out = nx.DiGraph()
     out.add_nodes_from(range(n))
     if n < 2:
         return out
@@ -69,7 +85,7 @@ def add_stop_nodes(graph: nx.Graph, stop_to_road_node: list[tuple[float, float]]
     k = min(max(2, k_neighbors + 1), len(unique_nodes))
     unique_index = {node: i for i, node in enumerate(unique_nodes)}
     stop_unique_index = [unique_index[node] for node in stop_to_road_node]
-    shortest_cache = {}
+    shortest_cache: dict[tuple[tuple[float, float], tuple[float, float]], tuple[float, float]] = {}
     for stop_idx, road_node in enumerate(stop_to_road_node):
         _, near = tree.query(road_node, k=k)
         for raw_idx in np.atleast_1d(near):
@@ -77,10 +93,10 @@ def add_stop_nodes(graph: nx.Graph, stop_to_road_node: list[tuple[float, float]]
             if ui == stop_unique_index[stop_idx]:
                 continue
             other = unique_nodes[ui]
-            key = tuple(sorted((road_node, other)))
+            key = (road_node, other)
             if key not in shortest_cache:
                 try:
-                    path = nx.shortest_path(graph, key[0], key[1], weight="time")
+                    path = nx.shortest_path(graph, road_node, other, weight="time")
                     shortest_cache[key] = (
                         float(nx.path_weight(graph, path, weight="time")),
                         float(nx.path_weight(graph, path, weight="length_km")),
