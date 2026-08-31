@@ -1,4 +1,8 @@
-"""Rolling-stock capacities and operating calculations."""
+"""Rolling-stock catalogue and route operating calculations.
+
+All monetary values are stored in million currency units, as supplied by the
+transport model input table. Capacity is the planning passenger capacity.
+"""
 
 from __future__ import annotations
 
@@ -10,27 +14,43 @@ import math
 class VehicleType:
     code: str
     name: str
+    mode: str
+    capacity_class: str
     capacity: float
+    unit_cost_mln: float
+    major_repair_share: float
+    contract_months: int
+    service_life_years: int
+    annual_contract_cost_mln: float
+    annual_amortization_mln: float
+    one_off_cost_mln: float
     technical_readiness: float
     electric: bool = False
+    charging_at_terminal: bool = False
 
 
+# Catalogue supplied for the Voronezh model. The duplicate ordinal "4" in the
+# source table is intentionally represented by two separate vehicle records.
 VEHICLE_TYPES: dict[str, VehicleType] = {
-    "paz_3205": VehicleType("paz_3205", "МК ПАЗ 3205", 18, 0.80),
-    "liaz_4292": VehicleType("liaz_4292", "СК ЛИАЗ 4292", 43, 0.80),
-    "liaz_5292": VehicleType("liaz_5292", "БК ЛИАЗ 5292", 68, 0.80),
-    "electric_liaz": VehicleType("electric_liaz", "Эл.БК ЛиАЗ", 73, 0.80, True),
-    "electric_kamaz": VehicleType("electric_kamaz", "Эл.БК КамАЗ", 72, 0.80, True),
-    "ziu_9": VehicleType("ziu_9", "Тб БК ЗИУ-9", 73, 0.90),
-    "liaz_6213": VehicleType("liaz_6213", "ОБК ЛИАЗ 6213", 93, 0.80),
-    "ziu_10": VehicleType("ziu_10", "Тб ОБК ЗИУ-10", 98, 0.90),
-    "tm_71_911": VehicleType("tm_71_911", "Тм-МК 71-911ЕМ", 95, 0.90),
-    "tm_bogatyr": VehicleType("tm_bogatyr", "Тм-СК Богатырь", 111, 0.90),
-    "tm_vityaz": VehicleType("tm_vityaz", "Тм-БК Витязь", 162, 0.90),
-    "tm_lev": VehicleType("tm_lev", "Тм-ОБК Лев", 226, 0.90),
+    "ford_transit": VehicleType("ford_transit", "Форд-Транзит", "Авт", "МК", 18, 2.60, 0.00, 12, 5, 0.52, 74, 371.8, 0.80),
+    "gazelle_city": VehicleType("gazelle_city", "Газель-Сити", "Авт", "МК", 18, 3.20, 0.00, 12, 5, 0.64, 69, 345.6, 0.80),
+    "paz_3205": VehicleType("paz_3205", "ПАЗ", "Авт", "СК", 43, 4.10, 0.00, 12, 5, 0.82, 39, 192.7, 0.80),
+    "liaz_5292": VehicleType("liaz_5292", "ЛИАЗ", "Авт", "БК", 68, 12.00, 0.00, 12, 7, 1.71, 55, 384.0, 0.80),
+    "liaz_5292_gas": VehicleType("liaz_5292_gas", "ЛИАЗ, газовый", "Авт", "БК", 68, 12.00, 0.00, 12, 7, 1.71, 55, 384.0, 0.80),
+    "liaz_6213": VehicleType("liaz_6213", "ЛиАЗ ОБК", "Авт", "ОБК", 93, 16.00, 0.00, 12, 7, 2.29, 50, 352.0, 0.80),
+    "liaz_6213_gas": VehicleType("liaz_6213_gas", "ЛиАЗ ОБК, газовый", "Авт", "ОБК", 93, 16.00, 0.00, 12, 7, 2.29, 50, 352.0, 0.80),
+    "kamaz_electric": VehicleType("kamaz_electric", "КамАЗ, зарядка на конечной", "Элб", "БК", 72, 34.40, 0.30, 12, 15, 2.98, 98, 1135.0, 0.80, True, True),
+    "admiral": VehicleType("admiral", "Адмирал", "Тб", "БК", 73, 22.00, 0.00, 12, 15, 1.47, 40, 594.0, 0.90),
+    "admiral_obk": VehicleType("admiral_obk", "Адмирал ОБК", "Тб", "ОБК", 98, 28.00, 0.00, 12, 15, 1.87, 41, 616.0, 0.90),
+    "tuah_bk": VehicleType("tuah_bk", "БК", "ТУАХ", "БК", 73, 27.00, 0.30, 12, 15, 2.34, 63, 729.0, 0.90, True, True),
+    "tuah_obk": VehicleType("tuah_obk", "Адмирал ОБК", "ТУАХ", "ОБК", 98, 33.00, 0.30, 12, 15, 2.86, 63, 726.0, 0.90, True, True),
+    "tm_lvenok": VehicleType("tm_lvenok", "Львенок", "Тм", "БК", 95, 45.00, 0.38, 12, 30, 2.07, 46, 990.0, 0.90),
+    "tm_vityaz": VehicleType("tm_vityaz", "Витязь", "Тм", "ОБК", 162, 96.00, 0.38, 12, 30, 4.42, 57, 1248.0, 0.90),
+    "tm_2x_bk": VehicleType("tm_2x_bk", "2хБК", "Тм", "2хБК", 324, 90.00, 0.38, 12, 30, 4.14, 54, 1170.0, 0.90),
+    "tm_3x_bk": VehicleType("tm_3x_bk", "3хБК", "Тм", "3хБК", 486, 135.00, 0.38, 12, 30, 6.21, 81, 1755.0, 0.90),
 }
 
-DEFAULT_VEHICLE_TYPE = "electric_liaz"
+DEFAULT_VEHICLE_TYPE = "kamaz_electric"
 
 
 def get_vehicle_type(code: str) -> VehicleType:
@@ -63,42 +83,48 @@ def calculate_route_operations(
     park_trip_coefficient: float = 0.90,
     frequency_profile: tuple[tuple[float, float], ...] = ((3.0, 1.0), (6.0, 0.75), (4.0, 1.0), (3.0, 0.60), (8.0, 0.30)),
 ) -> dict[str, float | str]:
-    """Calculate the requested conditional-route operating indicators."""
+    """Calculate operating indicators for one route and one PS type."""
     if route_length_km <= 0 or max_section_flow_pph < 0 or speed_kmh <= 0:
         raise ValueError("Invalid route operating inputs")
+
     vehicle = get_vehicle_type(vehicle_type)
-    frequency_vph = max_section_flow_pph / vehicle.capacity if max_section_flow_pph > 0 else 0.0
-    # No demand means the minimum useful service frequency is applied.
-    frequency_vph = max(frequency_vph, 0.1)
+    frequency_vph = max(max_section_flow_pph / vehicle.capacity, 0.1)
     raw_interval = 60.0 / frequency_vph
-    interval_min = round_down_half_minutes(raw_interval + interval_reserve_sec / 60.0)
-    interval_min = max(interval_min, 0.5)
+    interval_min = max(round_down_half_minutes(raw_interval + interval_reserve_sec / 60.0), 0.5)
     frequency_vph = 60.0 / interval_min
 
     running_min = route_length_km / speed_kmh * 60.0
-    cycle_min = running_min * (1.0 + terminal_delay_reserve) + 2.0 * charging_min_per_terminal if vehicle.electric else running_min * (1.0 + terminal_delay_reserve)
+    cycle_min = running_min * (1.0 + terminal_delay_reserve)
+    if vehicle.charging_at_terminal:
+        cycle_min += 2.0 * charging_min_per_terminal
     cycle_min = round_up_to_interval(cycle_min, interval_min)
+
     release = cycle_min / interval_min
     fleet = math.ceil(release / vehicle.technical_readiness - 1e-9)
 
-    # frequency_profile is (hours in period, multiplier). The multiplier scales
-    # the peak frequency. This yields the number of scheduled round trips/day.
-    daily_trips = 0.0
-    for hours, multiplier in frequency_profile:
-        daily_trips += hours * frequency_vph * multiplier
+    daily_trips = sum(hours * frequency_vph * multiplier for hours, multiplier in frequency_profile)
     annual_mileage_km = route_length_km * daily_trips / park_trip_coefficient * annual_days
-    annual_in_service_hours = (cycle_min / 60.0) * daily_trips / park_trip_coefficient * annual_days
+    annual_in_service_hours = cycle_min / 60.0 * daily_trips / park_trip_coefficient * annual_days
 
     return {
         "vehicle_type": vehicle.code,
         "vehicle_name": vehicle.name,
+        "mode": vehicle.mode,
+        "capacity_class": vehicle.capacity_class,
         "capacity": vehicle.capacity,
+        "unit_cost_mln": vehicle.unit_cost_mln,
+        "major_repair_share": vehicle.major_repair_share,
+        "contract_months": vehicle.contract_months,
+        "service_life_years": vehicle.service_life_years,
+        "annual_contract_cost_mln": vehicle.annual_contract_cost_mln,
+        "annual_amortization_mln": vehicle.annual_amortization_mln,
+        "one_off_cost_mln": vehicle.one_off_cost_mln,
         "max_section_flow_pph": float(max_section_flow_pph),
         "speed_kmh": speed_kmh,
         "frequency_vph": frequency_vph,
         "interval_min": interval_min,
         "terminal_delay_reserve": terminal_delay_reserve,
-        "charging_min_per_terminal": charging_min_per_terminal if vehicle.electric else 0.0,
+        "charging_min_per_terminal": charging_min_per_terminal if vehicle.charging_at_terminal else 0.0,
         "cycle_time_min": cycle_min,
         "release": release,
         "technical_readiness": vehicle.technical_readiness,
@@ -106,4 +132,7 @@ def calculate_route_operations(
         "daily_trips": daily_trips,
         "annual_mileage_km": annual_mileage_km,
         "annual_in_service_hours": annual_in_service_hours,
+        "annual_fleet_contract_cost_mln": fleet * vehicle.annual_contract_cost_mln,
+        "annual_fleet_amortization_mln": fleet * vehicle.annual_amortization_mln,
+        "one_off_fleet_cost_mln": fleet * vehicle.one_off_cost_mln,
     }
