@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import networkx as nx
 import numpy as np
 import scipy.spatial as spatial
-import networkx as nx
 import geopandas as gpd
 
 from config import PROJ_EPSG
@@ -12,12 +12,7 @@ from src.phase2 import ROAD_SPEED_KMH
 
 
 def build_tndp_graph(roads: gpd.GeoDataFrame) -> nx.Graph:
-    """Build an undirected graph with TNDP edge attributes.
-
-    Nodes are road vertices. Edges contain ``time`` in minutes and
-    ``length_km``. The graph is intended for candidate generation; AequilibraE
-    remains the authoritative network model for final transit assignment.
-    """
+    """Build an undirected road graph with time and length attributes."""
     graph = nx.Graph()
     projected = roads.to_crs(PROJ_EPSG)
     for _, row in projected.iterrows():
@@ -35,7 +30,6 @@ def build_tndp_graph(roads: gpd.GeoDataFrame) -> nx.Graph:
                 time_min = length_km / speed * 60.0
                 attrs = {"time": time_min, "length_km": length_km}
                 if graph.has_edge(a, b):
-                    # Keep the fastest representation of duplicate OSM segments.
                     if time_min < graph[a][b]["time"]:
                         graph[a][b].update(attrs)
                 else:
@@ -46,13 +40,8 @@ def build_tndp_graph(roads: gpd.GeoDataFrame) -> nx.Graph:
 def snap_stops_to_graph(
     graph: nx.Graph,
     stops: gpd.GeoDataFrame,
-) -> tuple[nx.Graph, list[int], np.ndarray]:
-    """Snap stop points to road nodes and return stop->graph-node mapping.
-
-    Returned node IDs are the original road graph coordinate tuples. The
-    returned coordinates are projected kilometres in the same order as the
-    stops table.
-    """
+) -> tuple[nx.Graph, list[tuple[float, float]], np.ndarray]:
+    """Snap stop points to nearest road vertices."""
     projected = stops.to_crs(PROJ_EPSG).reset_index(drop=True)
     nodes = list(graph.nodes)
     if not nodes:
@@ -62,39 +51,56 @@ def snap_stops_to_graph(
     stop_xy_m = np.column_stack([projected.geometry.x, projected.geometry.y])
     _, idx = tree.query(stop_xy_m, k=1)
     mapping = [nodes[int(i)] for i in idx]
-    graph_xy_km = node_xy / 1000.0
-    return graph, mapping, graph_xy_km
+    return graph, mapping, node_xy / 1000.0
 
 
 def add_stop_nodes(
     graph: nx.Graph,
     stop_to_road_node: list[tuple[float, float]],
+    k_neighbors: int = 8,
 ) -> nx.Graph:
-    """Return a graph whose node IDs are integer stop indices.
+    """Create a compact stop graph using k-nearest neighbours.
 
-    Parallel stop mappings are connected by the shortest road path. This gives
-    candidate generation a compact transit-node graph while preserving road
-    travel times between stops.
+    Exact road-network travel time is retained on each virtual stop-to-stop
+    edge. Complexity is approximately O(n*k) shortest-path queries rather than
+    O(n²) all-pairs stop construction.
     """
+    n = len(stop_to_road_node)
     out = nx.Graph()
-    unique = list(dict.fromkeys(stop_to_road_node))
-    for i in range(len(stop_to_road_node)):
-        out.add_node(i)
-    for i, a in enumerate(unique):
-        for j in range(i + 1, len(unique)):
-            pass
-    # Compute only pairs actually needed by shortest paths later. Keeping the
-    # full road graph is more efficient for large real networks; stop IDs are
-    # therefore connected via virtual edges using cached shortest path costs.
-    for i, a in enumerate(stop_to_road_node):
-        for j in range(i + 1, len(stop_to_road_node)):
-            if a == stop_to_road_node[j]:
+    out.add_nodes_from(range(n))
+    if n < 2:
+        return out
+
+    unique_nodes = list(dict.fromkeys(stop_to_road_node))
+    unique_xy = np.asarray(unique_nodes, dtype=float)
+    tree = spatial.cKDTree(unique_xy)
+    k = min(max(2, k_neighbors + 1), len(unique_nodes))
+    unique_index = {node: i for i, node in enumerate(unique_nodes)}
+    stop_unique_index = [unique_index[node] for node in stop_to_road_node]
+
+    shortest_cache: dict[tuple[tuple[float, float], tuple[float, float]], tuple[float, float]] = {}
+    for stop_idx, road_node in enumerate(stop_to_road_node):
+        _, near = tree.query(road_node, k=k)
+        near = np.atleast_1d(near)
+        for raw_idx in near:
+            ui = int(raw_idx)
+            if ui == stop_unique_index[stop_idx]:
                 continue
-            try:
-                path = nx.shortest_path(graph, a, stop_to_road_node[j], weight="time")
-                t = nx.path_weight(graph, path, weight="time")
-                l = nx.path_weight(graph, path, weight="length_km")
-            except nx.NetworkXNoPath:
-                continue
-            out.add_edge(i, j, time=float(t), length_km=float(l))
+            other = unique_nodes[ui]
+            key = tuple(sorted((road_node, other)))
+            if key not in shortest_cache:
+                try:
+                    length = float(nx.path_weight(graph, nx.shortest_path(graph, key[0], key[1], weight="time"), weight="length_km"))
+                    time_min = float(nx.shortest_path_length(graph, key[0], key[1], weight="time"))
+                    shortest_cache[key] = (time_min, length)
+                except nx.NetworkXNoPath:
+                    continue
+            time_min, length = shortest_cache[key]
+            other_stops = [j for j, node in enumerate(stop_to_road_node) if node == other]
+            for j in other_stops:
+                if j == stop_idx:
+                    continue
+                current = out.get_edge_data(stop_idx, j)
+                if current is None or time_min < current["time"]:
+                    out.add_edge(stop_idx, j, time=time_min, length_km=length)
     return out
