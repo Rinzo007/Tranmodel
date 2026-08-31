@@ -1,7 +1,8 @@
 """Rolling-stock catalogue and route operating calculations.
 
-All monetary values are stored in million currency units, as supplied by the
-transport model input table. Capacity is the planning passenger capacity.
+The catalogue follows the user's 16-position operating/economic table.
+Monetary values are million currency units; capacities are planning passenger
+capacities used for frequency calculation.
 """
 
 from __future__ import annotations
@@ -29,28 +30,31 @@ class VehicleType:
     charging_at_terminal: bool = False
 
 
-# Catalogue supplied for the Voronezh model. The duplicate ordinal "4" in the
-# source table is intentionally represented by two separate vehicle records.
 VEHICLE_TYPES: dict[str, VehicleType] = {
+    # Автобусы
     "ford_transit": VehicleType("ford_transit", "Форд-Транзит", "Авт", "МК", 18, 2.60, 0.00, 12, 5, 0.52, 74, 371.8, 0.80),
     "gazelle_city": VehicleType("gazelle_city", "Газель-Сити", "Авт", "МК", 18, 3.20, 0.00, 12, 5, 0.64, 69, 345.6, 0.80),
-    "paz_3205": VehicleType("paz_3205", "ПАЗ", "Авт", "СК", 43, 4.10, 0.00, 12, 5, 0.82, 39, 192.7, 0.80),
-    "liaz_5292": VehicleType("liaz_5292", "ЛИАЗ", "Авт", "БК", 68, 12.00, 0.00, 12, 7, 1.71, 55, 384.0, 0.80),
-    "liaz_5292_gas": VehicleType("liaz_5292_gas", "ЛИАЗ, газовый", "Авт", "БК", 68, 12.00, 0.00, 12, 7, 1.71, 55, 384.0, 0.80),
-    "liaz_6213": VehicleType("liaz_6213", "ЛиАЗ ОБК", "Авт", "ОБК", 93, 16.00, 0.00, 12, 7, 2.29, 50, 352.0, 0.80),
-    "liaz_6213_gas": VehicleType("liaz_6213_gas", "ЛиАЗ ОБК, газовый", "Авт", "ОБК", 93, 16.00, 0.00, 12, 7, 2.29, 50, 352.0, 0.80),
-    "kamaz_electric": VehicleType("kamaz_electric", "КамАЗ, зарядка на конечной", "Элб", "БК", 72, 34.40, 0.30, 12, 15, 2.98, 98, 1135.0, 0.80, True, True),
-    "admiral": VehicleType("admiral", "Адмирал", "Тб", "БК", 73, 22.00, 0.00, 12, 15, 1.47, 40, 594.0, 0.90),
+    "paz": VehicleType("paz", "ПАЗ", "Авт", "СК", 43, 4.10, 0.00, 12, 5, 0.82, 39, 192.7, 0.80),
+    "liaz": VehicleType("liaz", "ЛИАЗ", "Авт", "БК", 68, 12.00, 0.00, 12, 7, 1.71, 55, 384.0, 0.80),
+    "liaz_gas": VehicleType("liaz_gas", "ЛИАЗ, газовый", "Авт", "БК", 68, 12.00, 0.00, 12, 7, 1.71, 55, 384.0, 0.80),
+    "liaz_obk": VehicleType("liaz_obk", "Лиаз ОБК", "Авт", "ОБК", 93, 16.00, 0.00, 12, 7, 2.29, 50, 352.0, 0.80),
+    "liaz_obk_gas": VehicleType("liaz_obk_gas", "Лиаз ОБК, газовый", "Авт", "ОБК", 93, 16.00, 0.00, 12, 7, 2.29, 50, 352.0, 0.80),
+    # Электробус
+    "kamaz_charge_terminal": VehicleType("kamaz_charge_terminal", "Камаз, зарядка на конечной", "Элб", "БК", 72, 34.40, 0.30, 12, 15, 2.98, 98, 1135.0, 0.80, True, True),
+    # Троллейбусы
+    "admiral_bk": VehicleType("admiral_bk", "Адмирал", "Тб", "БК", 73, 22.00, 0.00, 12, 15, 1.47, 40, 594.0, 0.90),
     "admiral_obk": VehicleType("admiral_obk", "Адмирал ОБК", "Тб", "ОБК", 98, 28.00, 0.00, 12, 15, 1.87, 41, 616.0, 0.90),
+    # ТУАХ — автономный ход. В таблице приведены два класса вместимости.
     "tuah_bk": VehicleType("tuah_bk", "БК", "ТУАХ", "БК", 73, 27.00, 0.30, 12, 15, 2.34, 63, 729.0, 0.90, True, True),
     "tuah_obk": VehicleType("tuah_obk", "Адмирал ОБК", "ТУАХ", "ОБК", 98, 33.00, 0.30, 12, 15, 2.86, 63, 726.0, 0.90, True, True),
+    # Трамваи. Для сцепок вместимость масштабируется по числу секций/единиц.
     "tm_lvenok": VehicleType("tm_lvenok", "Львенок", "Тм", "БК", 95, 45.00, 0.38, 12, 30, 2.07, 46, 990.0, 0.90),
     "tm_vityaz": VehicleType("tm_vityaz", "Витязь", "Тм", "ОБК", 162, 96.00, 0.38, 12, 30, 4.42, 57, 1248.0, 0.90),
-    "tm_2x_bk": VehicleType("tm_2x_bk", "2хБК", "Тм", "2хБК", 324, 90.00, 0.38, 12, 30, 4.14, 54, 1170.0, 0.90),
-    "tm_3x_bk": VehicleType("tm_3x_bk", "3хБК", "Тм", "3хБК", 486, 135.00, 0.38, 12, 30, 6.21, 81, 1755.0, 0.90),
+    "tm_2x_bk": VehicleType("tm_2x_bk", "2хБК", "Тм", "2хБК", 190, 90.00, 0.38, 12, 30, 4.14, 54, 1170.0, 0.90),
+    "tm_3x_bk": VehicleType("tm_3x_bk", "3хБК", "Тм", "3хБК", 285, 135.00, 0.38, 12, 30, 6.21, 81, 1755.0, 0.90),
 }
 
-DEFAULT_VEHICLE_TYPE = "kamaz_electric"
+DEFAULT_VEHICLE_TYPE = "kamaz_charge_terminal"
 
 
 def get_vehicle_type(code: str) -> VehicleType:
@@ -83,7 +87,7 @@ def calculate_route_operations(
     park_trip_coefficient: float = 0.90,
     frequency_profile: tuple[tuple[float, float], ...] = ((3.0, 1.0), (6.0, 0.75), (4.0, 1.0), (3.0, 0.60), (8.0, 0.30)),
 ) -> dict[str, float | str]:
-    """Calculate operating indicators for one route and one PS type."""
+    """Calculate operating and lifecycle indicators for one route."""
     if route_length_km <= 0 or max_section_flow_pph < 0 or speed_kmh <= 0:
         raise ValueError("Invalid route operating inputs")
 
@@ -101,7 +105,6 @@ def calculate_route_operations(
 
     release = cycle_min / interval_min
     fleet = math.ceil(release / vehicle.technical_readiness - 1e-9)
-
     daily_trips = sum(hours * frequency_vph * multiplier for hours, multiplier in frequency_profile)
     annual_mileage_km = route_length_km * daily_trips / park_trip_coefficient * annual_days
     annual_in_service_hours = cycle_min / 60.0 * daily_trips / park_trip_coefficient * annual_days
