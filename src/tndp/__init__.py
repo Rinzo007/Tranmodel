@@ -14,6 +14,7 @@ from .operating_plan import build_network_operating_plan
 from .period_assignment import PeriodDemand, PeriodAssignment, build_period_demands, aggregate_period_assignments
 from .period_costs import route_period_costs
 from .cost_aggregation import aggregate_route_costs, aggregate_network_costs
+from .multiperiod_assignment import evaluate_route_set_aequilibrae_periods
 
 __all__ = [
     "NetworkDesignConfig", "Route", "RouteSet", "Evaluation", "DemandCorridor",
@@ -26,4 +27,5 @@ __all__ = [
     "PeriodPlan", "build_period_plan", "summarize_period_plan", "build_network_operating_plan",
     "PeriodDemand", "PeriodAssignment", "build_period_demands", "aggregate_period_assignments",
     "route_period_costs", "aggregate_route_costs", "aggregate_network_costs",
+    "evaluate_route_set_aequilibrae_periods",
 ]
