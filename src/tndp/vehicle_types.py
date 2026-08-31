@@ -1,79 +1,62 @@
-"""Rolling-stock catalogue and route operating calculations.
-
-The catalogue follows the user's 16-position operating/economic table.
-Monetary values are million currency units; capacities are planning passenger
-capacities used for frequency calculation.
-"""
-
+"""Rolling-stock catalogue and driver-cost parameters for route operation."""
 from __future__ import annotations
-
 from dataclasses import dataclass
 import math
 
 @dataclass(frozen=True, slots=True)
 class VehicleType:
-    code: str
-    name: str
-    mode: str
-    capacity_class: str
-    capacity: float
-    unit_cost_mln: float
-    major_repair_share: float
-    contract_months: int
-    service_life_years: int
-    annual_contract_cost_mln: float
-    annual_amortization_mln: float
-    one_off_cost_mln: float
-    technical_readiness: float
-    electric: bool = False
-    charging_at_terminal: bool = False
+    code: str; name: str; mode: str; capacity_class: str; capacity: float
+    unit_cost_mln: float; major_repair_share: float; contract_months: int; service_life_years: int
+    annual_contract_cost_mln: float; annual_amortization_mln: float; one_off_cost_mln: float
+    technical_readiness: float; electric: bool=False; charging_at_terminal: bool=False
+    salary_coefficient: float=1.0; salary_city_coefficient: float=1.0
+    work_hours_year: float=1772.0; prep_close_coefficient: float=1.06; ticket_sales_coefficient: float=1.0
+    driver_hour_cost: float=0.0; driver_hour_with_charges: float=0.0; annual_crew_cost_mln: float=0.0
 
-VEHICLE_TYPES: dict[str, VehicleType] = {
-    "ford_transit": VehicleType("ford_transit", "Форд-Транзит", "Авт", "МК", 18, 2.60, 0.00, 12, 5, 0.52, 74, 371.8, 0.80),
-    "gazelle_city": VehicleType("gazelle_city", "Газель-Сити", "Авт", "МК", 18, 3.20, 0.00, 12, 5, 0.64, 69, 345.6, 0.80),
-    "paz": VehicleType("paz", "ПАЗ", "Авт", "СК", 43, 4.10, 0.00, 12, 5, 0.82, 39, 192.7, 0.80),
-    "liaz": VehicleType("liaz", "ЛИАЗ", "Авт", "БК", 68, 12.00, 0.00, 12, 7, 1.71, 55, 384.0, 0.80),
-    "liaz_gas": VehicleType("liaz_gas", "ЛИАЗ, газовый", "Авт", "БК", 68, 12.00, 0.00, 12, 7, 1.71, 55, 384.0, 0.80),
-    "liaz_obk": VehicleType("liaz_obk", "Лиаз ОБК", "Авт", "ОБК", 93, 16.00, 0.00, 12, 7, 2.29, 50, 352.0, 0.80),
-    "liaz_obk_gas": VehicleType("liaz_obk_gas", "Лиаз ОБК, газовый", "Авт", "ОБК", 93, 16.00, 0.00, 12, 7, 2.29, 50, 352.0, 0.80),
-    # Электробус: ГЭТ/электрический подвижной состав — КТГ 90%.
-    "kamaz_charge_terminal": VehicleType("kamaz_charge_terminal", "Камаз, зарядка на конечной", "Элб", "БК", 72, 34.40, 0.30, 12, 15, 2.98, 98, 1135.0, 0.90, True, True),
-    "admiral_bk": VehicleType("admiral_bk", "Адмирал", "Тб", "БК", 73, 22.00, 0.00, 12, 15, 1.47, 40, 594.0, 0.90),
-    "admiral_obk": VehicleType("admiral_obk", "Адмирал ОБК", "Тб", "ОБК", 98, 28.00, 0.00, 12, 15, 1.87, 41, 616.0, 0.90),
-    "tuah_bk": VehicleType("tuah_bk", "БК", "ТУАХ", "БК", 73, 27.00, 0.30, 12, 15, 2.34, 63, 729.0, 0.90, True, True),
-    "tuah_obk": VehicleType("tuah_obk", "Адмирал ОБК", "ТУАХ", "ОБК", 98, 33.00, 0.30, 12, 15, 2.86, 63, 726.0, 0.90, True, True),
-    "tm_lvenok": VehicleType("tm_lvenok", "Львенок", "Тм", "БК", 95, 45.00, 0.38, 12, 30, 2.07, 46, 990.0, 0.90),
-    "tm_vityaz": VehicleType("tm_vityaz", "Витязь", "Тм", "ОБК", 162, 96.00, 0.38, 12, 30, 4.42, 57, 1248.0, 0.90),
-    "tm_2x_bk": VehicleType("tm_2x_bk", "2хБК", "Тм", "2хБК", 190, 90.00, 0.38, 12, 30, 4.14, 54, 1170.0, 0.90),
-    "tm_3x_bk": VehicleType("tm_3x_bk", "3хБК", "Тм", "3хБК", 285, 135.00, 0.38, 12, 30, 6.21, 81, 1755.0, 0.90),
-}
+_BASE = 36480.0
+_V = [
+("ford_transit","Форд-Транзит","Авт","МК",18,2.60,0,.98,256.6,335.7,229),
+("gazelle_city","Газель-Сити","Авт","МК",18,3.20,0,.98,256.6,335.7,173),
+("paz","ПАЗ","Авт","СК",43,4.10,0,1.05,275.0,359.6,80),
+("liaz","ЛИАЗ","Авт","БК",68,12.00,0,1.43,374.5,489.8,73),
+("liaz_gas","ЛИАЗ, газовый","Авт","БК",68,12.00,0,1.43,374.5,489.8,73),
+("liaz_obk","Лиаз ОБК","Авт","ОБК",93,16.00,0,1.50,392.8,513.8,52),
+("liaz_obk_gas","Лиаз ОБК, газовый","Авт","ОБК",93,16.00,0,1.50,392.8,513.8,52),
+("kamaz_charge_terminal","Камаз, зарядка на конечной","Элб","БК",72,34.40,.30,1.00,261.9,342.5,50),
+("admiral_bk","Адмирал","Тб","БК",73,22.00,0,1.00,261.9,342.5,41),
+("admiral_obk","Адмирал ОБК","Тб","ОБК",98,28.00,0,1.10,288.0,376.8,36),
+("tuah_bk","БК","ТУАХ","БК",73,27.00,.30,1.00,261.9,342.5,41),
+("tuah_obk","Адмирал ОБК","ТУАХ","ОБК",98,33.00,.30,1.10,288.0,376.8,36),
+("tm_lvenok","Львенок","Тм","БК",95,45.00,.38,.90,235.7,308.3,30),
+("tm_vityaz","Витязь","Тм","ОБК",162,96.00,.38,1.00,261.9,342.5,19),
+("tm_2x_bk","2хБК","Тм","2хБК",190,90.00,.38,1.00,261.9,342.5,19),
+("tm_3x_bk","3хБК","Тм","3хБК",285,135.00,.38,1.10,288.0,376.8,21),
+]
+VEHICLE_TYPES={}
+for code,name,mode,cls,cap,cost,repair,scoef,hour,hour_ch,crew in _V:
+    # salary inputs: 36 480 average salary, 1.06 preparation/closing coefficient,
+    # 1772 productive hours, 1.0 ticket-sales coefficient, metropolitan factor 1.0.
+    VEHICLE_TYPES[code]=VehicleType(code,name,mode,cls,cap,cost,repair,12,15 if mode in ("Тб","ТУАХ") else (30 if mode=="Тм" else 5),cost/12*0.2 if False else ({"ford_transit":.52,"gazelle_city":.64,"paz":.82,"liaz":1.71,"liaz_gas":1.71,"liaz_obk":2.29,"liaz_obk_gas":2.29,"kamaz_charge_terminal":2.98,"admiral_bk":1.47,"admiral_obk":1.87,"tuah_bk":2.34,"tuah_obk":2.86,"tm_lvenok":2.07,"tm_vityaz":4.42,"tm_2x_bk":4.14,"tm_3x_bk":6.21}[code]),
+        {"ford_transit":74,"gazelle_city":69,"paz":39,"liaz":55,"liaz_gas":55,"liaz_obk":50,"liaz_obk_gas":50,"kamaz_charge_terminal":98,"admiral_bk":40,"admiral_obk":41,"tuah_bk":63,"tuah_obk":63,"tm_lvenok":46,"tm_vityaz":57,"tm_2x_bk":54,"tm_3x_bk":81}[code],
+        {"ford_transit":371.8,"gazelle_city":345.6,"paz":192.7,"liaz":384,"liaz_gas":384,"liaz_obk":352,"liaz_obk_gas":352,"kamaz_charge_terminal":1135,"admiral_bk":594,"admiral_obk":616,"tuah_bk":729,"tuah_obk":726,"tm_lvenok":990,"tm_vityaz":1248,"tm_2x_bk":1170,"tm_3x_bk":1755}[code],
+        .80 if mode=="Авт" else .90, mode in ("Элб","ТУАХ"), code in ("kamaz_charge_terminal","tuah_bk","tuah_obk"), scoef,1.0,1772,1.06,1.0,hour,hour_ch,crew)
+DEFAULT_VEHICLE_TYPE="kamaz_charge_terminal"
 
-DEFAULT_VEHICLE_TYPE = "kamaz_charge_terminal"
+def get_vehicle_type(code):
+    try:return VEHICLE_TYPES[code]
+    except KeyError as exc:raise ValueError(f"Unknown vehicle type: {code}") from exc
 
-def get_vehicle_type(code: str) -> VehicleType:
-    try: return VEHICLE_TYPES[code]
-    except KeyError as exc: raise ValueError(f"Unknown vehicle type: {code}") from exc
+def round_down_half_minutes(minutes): return math.floor(minutes*2+1e-9)/2
+def round_up_to_interval(minutes,interval_min): return math.ceil(minutes/interval_min-1e-12)*interval_min
 
-def round_down_half_minutes(minutes: float) -> float:
-    return math.floor(minutes * 2.0 + 1e-9) / 2.0
-
-def round_up_to_interval(minutes: float, interval_min: float) -> float:
-    if interval_min <= 0: raise ValueError("interval_min must be positive")
-    return math.ceil(minutes / interval_min - 1e-12) * interval_min
-
-def calculate_route_operations(*, route_length_km: float, max_section_flow_pph: float, vehicle_type: str = DEFAULT_VEHICLE_TYPE, speed_kmh: float = 18.0, interval_reserve_sec: float = 20.0, terminal_delay_reserve: float = .08, charging_min_per_terminal: float = 10.0, annual_days: int = 350, park_trip_coefficient: float = 0.90, frequency_profile: tuple[tuple[float, float], ...] = ((1.0,.80),(2.0,1.0),(7.5,.80),(3.0,1.0),(1.5,.80),(3.0,.50))) -> dict[str, float | str]:
-    if route_length_km <= 0 or max_section_flow_pph < 0 or speed_kmh <= 0: raise ValueError("Invalid route operating inputs")
-    vehicle = get_vehicle_type(vehicle_type)
-    frequency_vph = max(max_section_flow_pph / vehicle.capacity, 0.1)
-    interval_min = max(round_down_half_minutes(60.0 / frequency_vph + interval_reserve_sec / 60.0), 0.5)
-    frequency_vph = 60.0 / interval_min
-    running_min = route_length_km / speed_kmh * 60.0
-    cycle_min = running_min * 1.08
-    if vehicle.charging_at_terminal: cycle_min += 2.0 * charging_min_per_terminal
-    cycle_min = round_up_to_interval(cycle_min, interval_min)
-    release = cycle_min / interval_min
-    fleet = math.ceil(release / vehicle.technical_readiness - 1e-9)
-    daily_trips = sum(hours * frequency_vph * multiplier for hours, multiplier in frequency_profile)
-    annual_mileage_km = route_length_km * daily_trips / park_trip_coefficient * annual_days
-    annual_in_service_hours = cycle_min / 60.0 * daily_trips / park_trip_coefficient * annual_days
-    return {"vehicle_type":vehicle.code,"vehicle_name":vehicle.name,"mode":vehicle.mode,"capacity_class":vehicle.capacity_class,"capacity":vehicle.capacity,"unit_cost_mln":vehicle.unit_cost_mln,"major_repair_share":vehicle.major_repair_share,"contract_months":vehicle.contract_months,"service_life_years":vehicle.service_life_years,"annual_contract_cost_mln":vehicle.annual_contract_cost_mln,"annual_amortization_mln":vehicle.annual_amortization_mln,"one_off_cost_mln":vehicle.one_off_cost_mln,"max_section_flow_pph":float(max_section_flow_pph),"speed_kmh":speed_kmh,"frequency_vph":frequency_vph,"interval_min":interval_min,"terminal_delay_reserve":terminal_delay_reserve,"charging_min_per_terminal":charging_min_per_terminal if vehicle.charging_at_terminal else 0.0,"cycle_time_min":cycle_min,"release":release,"technical_readiness":vehicle.technical_readiness,"fleet":float(fleet),"daily_trips":daily_trips,"annual_mileage_km":annual_mileage_km,"annual_in_service_hours":annual_in_service_hours,"annual_fleet_contract_cost_mln":fleet*vehicle.annual_contract_cost_mln,"annual_fleet_amortization_mln":fleet*vehicle.annual_amortization_mln,"one_off_fleet_cost_mln":fleet*vehicle.one_off_cost_mln}
+def calculate_route_operations(*,route_length_km,max_section_flow_pph,vehicle_type=DEFAULT_VEHICLE_TYPE,speed_kmh=18.0,interval_reserve_sec=20.0,terminal_delay_reserve=.08,charging_min_per_terminal=10.0,annual_days=350,park_trip_coefficient=.90,frequency_profile=((1,.8),(2,1),(7.5,.8),(3,1),(1.5,.8),(3,.5))):
+    v=get_vehicle_type(vehicle_type); peak_f=max(max_section_flow_pph/v.capacity,.1)
+    interval= max(round_down_half_minutes(60/peak_f+interval_reserve_sec/60),.5); peak_f=60/interval
+    cycle=route_length_km/speed_kmh*60*(1+terminal_delay_reserve)
+    if v.charging_at_terminal: cycle+=2*charging_min_per_terminal
+    cycle=round_up_to_interval(cycle,interval); release=cycle/interval; fleet=math.ceil(release/v.technical_readiness-1e-9)
+    daily_trips=sum(hours*peak_f*factor for hours,factor in frequency_profile)
+    annual_km=route_length_km*daily_trips/park_trip_coefficient*annual_days
+    annual_h=cycle/60*daily_trips/park_trip_coefficient*annual_days
+    annual_driver_cost=fleet*annual_h*v.driver_hour_with_charges/1e6
+    return {"vehicle_type":v.code,"vehicle_name":v.name,"mode":v.mode,"capacity_class":v.capacity_class,"capacity":v.capacity,"unit_cost_mln":v.unit_cost_mln,"major_repair_share":v.major_repair_share,"max_section_flow_pph":float(max_section_flow_pph),"frequency_vph":peak_f,"interval_min":interval,"cycle_time_min":cycle,"release":release,"technical_readiness":v.technical_readiness,"fleet":fleet,"daily_trips":daily_trips,"annual_mileage_km":annual_km,"annual_in_service_hours":annual_h,"annual_fleet_contract_cost_mln":fleet*v.annual_contract_cost_mln,"annual_fleet_amortization_mln":fleet*v.annual_amortization_mln,"one_off_fleet_cost_mln":fleet*v.one_off_cost_mln,"annual_crew_cost_mln":annual_driver_cost}
