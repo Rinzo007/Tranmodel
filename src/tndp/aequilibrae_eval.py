@@ -1,15 +1,10 @@
-"""Full AequilibraE evaluator for TNDP route sets."""
-
 from __future__ import annotations
 
-import csv
-import hashlib
 import json
-import math
 import shutil
 import tempfile
-import zipfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -17,119 +12,37 @@ from .model import Evaluation, NetworkDesignConfig, RouteSet
 
 
 class AequilibraEEvaluationError(RuntimeError):
-    pass
-
-
-def _hhmmss(seconds: float) -> str:
-    value = max(0, int(round(seconds)))
-    h, rem = divmod(value, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-
-def _distance_m(a: tuple[float, float], b: tuple[float, float]) -> float:
-    lon1, lat1 = a
-    lon2, lat2 = b
-    lat = math.radians((lat1 + lat2) / 2.0)
-    dx = math.radians(lon2 - lon1) * 6371000.0 * math.cos(lat)
-    dy = math.radians(lat2 - lat1) * 6371000.0
-    return float(math.hypot(dx, dy))
-
-
-def _write_csv(path: Path, rows: list[dict]) -> None:
-    if not rows:
-        raise AequilibraEEvaluationError(f"Cannot create empty GTFS table: {path.name}")
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def build_gtfs_from_route_set(route_set: RouteSet, stop_xy_lonlat: np.ndarray,
-                              output_zip: str | Path, *, service_date: str = "2026-01-15",
-                              default_headway_min: float = 10.0, service_start: int = 6 * 3600,
-                              service_end: int = 23 * 3600, speed_kmh: float = 22.0,
-                              dwell_sec: float = 20.0) -> Path:
-    """Build GTFS for a candidate route set; route nodes are transit-stop rows."""
-    if route_set.route_count() == 0:
-        raise AequilibraEEvaluationError("Cannot evaluate an empty route set")
-    target = Path(output_zip)
-    work = Path(tempfile.mkdtemp(prefix="tranmodel_gtfs_"))
-    try:
-        used = sorted({int(n) for route in route_set.routes for n in route.nodes})
-        stop_rows = []
-        for idx in used:
-            lon, lat = map(float, stop_xy_lonlat[idx])
-            stop_rows.append({"stop_id": f"s{idx + 1}", "stop_name": f"Stop {idx + 1}",
-                              "stop_lat": lat, "stop_lon": lon, "location_type": 0})
-        agency = [{"agency_id": "TRANMODEL", "agency_name": "Tranmodel TNDP",
-                   "agency_url": "https://github.com/Rinzo007/Tranmodel", "agency_timezone": "Europe/Moscow", "agency_lang": "ru"}]
-        calendar = [{"service_id": "daily", "monday": 1, "tuesday": 1, "wednesday": 1,
-                     "thursday": 1, "friday": 1, "saturday": 1, "sunday": 1,
-                     "start_date": service_date.replace("-", ""), "end_date": "20261231"}]
-        route_rows, trip_rows, stop_time_rows, shape_rows = [], [], [], []
-        for route_num, route in enumerate(route_set.routes, start=1):
-            route_id = f"r{route_num}"
-            route_rows.append({"route_id": route_id, "agency_id": "TRANMODEL",
-                               "route_short_name": str(route.route_id or route_num),
-                               "route_long_name": f"TNDP route {route_num}", "route_type": 3})
-            frequency = max(float(route.frequency_vph), 0.1)
-            headway_sec = max(60, int(round(3600.0 / frequency)))
-            departures = np.arange(service_start, service_end + 1, headway_sec)
-            for direction_id, seq in enumerate((tuple(route.nodes), tuple(reversed(route.nodes)))):
-                shape_id = f"sh{route_num}_{direction_id}"
-                for stop_seq, node in enumerate(seq, start=1):
-                    lon, lat = map(float, stop_xy_lonlat[int(node)])
-                    shape_rows.append({"shape_id": shape_id, "shape_pt_lat": lat,
-                                       "shape_pt_lon": lon, "shape_pt_sequence": stop_seq})
-                for trip_no, departure in enumerate(departures, start=1):
-                    trip_id = f"t{route_num}_{direction_id}_{trip_no}"
-                    trip_rows.append({"route_id": route_id, "service_id": "daily", "trip_id": trip_id,
-                                      "trip_headsign": f"direction {direction_id + 1}",
-                                      "direction_id": direction_id, "shape_id": shape_id})
-                    elapsed = 0.0
-                    for stop_seq, node in enumerate(seq, start=1):
-                        if stop_seq > 1:
-                            a = stop_xy_lonlat[int(seq[stop_seq - 2])]
-                            b = stop_xy_lonlat[int(node)]
-                            elapsed += _distance_m((float(a[0]), float(a[1])), (float(b[0]), float(b[1]))) / (speed_kmh * 1000 / 3600)
-                            elapsed += dwell_sec
-                        tm = _hhmmss(departure + elapsed)
-                        stop_time_rows.append({"trip_id": trip_id, "arrival_time": tm,
-                                               "departure_time": tm, "stop_id": f"s{int(node)+1}",
-                                               "stop_sequence": stop_seq})
-        for name, rows in {"agency.txt": agency, "stops.txt": stop_rows, "routes.txt": route_rows,
-                           "calendar.txt": calendar, "trips.txt": trip_rows,
-                           "stop_times.txt": stop_time_rows, "shapes.txt": shape_rows}.items():
-            _write_csv(work / name, rows)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for path in sorted(work.glob("*.txt")):
-                zf.write(path, path.name)
-        return target
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+    """Raised when AequilibraE cannot evaluate a route set."""
 
 
 def _route_set_key(route_set: RouteSet) -> str:
-    payload = [{"nodes": list(r.nodes), "freq": round(r.frequency_vph, 6)} for r in route_set.routes]
-    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    payload = [
+        {
+            "nodes": list(route.nodes),
+            "frequency": float(route.frequency),
+        }
+        for route in route_set.routes
+    ]
+    return str(abs(hash(json.dumps(payload, sort_keys=True))))
 
 
-def evaluate_route_set_aequilibrae(route_set: RouteSet, demand_matrix: np.ndarray,
-                                   stop_xy_lonlat: np.ndarray, project_path: str | Path,
-                                   config: NetworkDesignConfig | None = None, *,
-                                   cache_dir: str | Path | None = None) -> Evaluation:
-    """Evaluate zone OD demand on a transit network whose physical stops are independent of zones."""
-    config = config or NetworkDesignConfig()
-    demand = np.asarray(demand_matrix, dtype=float)
-    if demand.ndim != 2 or demand.shape[0] != demand.shape[1]:
-        raise ValueError("demand_matrix must be square")
-    total = float(demand.sum())
-    if route_set.route_count() == 0:
-        return Evaluation(score=total * config.uncovered_demand_weight,
-                          uncovered_demand=total, direct_demand_share=0.0,
-                          metadata={"evaluator": "AequilibraE", "empty_network": True})
+def evaluate_route_set_aequilibrae(
+    route_set: RouteSet,
+    demand: np.ndarray,
+    stop_xy_lonlat: np.ndarray,
+    project_path: str | Path,
+    config: NetworkDesignConfig,
+    cache_dir: str | Path | None = None,
+) -> Evaluation:
+    """Evaluate a candidate route set using AequilibraE TransitAssignment."""
+    total = float(np.asarray(demand, dtype=float).sum())
+    if not route_set.routes:
+        return Evaluation(
+            score=total * config.uncovered_demand_weight,
+            uncovered_demand=total,
+            direct_demand_share=0.0,
+            metadata={"evaluator": "AequilibraE", "empty_network": True},
+        )
 
     key = _route_set_key(route_set)
     root = Path(cache_dir) if cache_dir else Path(tempfile.mkdtemp(prefix="tranmodel_tndp_eval_"))
@@ -158,15 +71,29 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand_matrix: np.ndarra
         gtfs = build_gtfs_from_route_set(route_set, stop_xy_lonlat, temp_root / "routes.zip")
         project = Project.from_path(project_dir)
         transit = Transit(project)
-        builder = transit.new_gtfs_builder(agency="TRANMODEL", file_path=str(gtfs),
-                                           day="2026-01-15", description="TNDP candidate route set")
+        builder = transit.new_gtfs_builder(
+            agency="TRANMODEL",
+            file_path=str(gtfs),
+            day="2026-01-15",
+            description="TNDP candidate route set",
+        )
+        # In current AequilibraE, GTFS loading/saving belongs to the
+        # GTFSRouteSystemBuilder. Older versions exposed save_to_disk() on
+        # Transit itself, but that method is not present in newer releases.
         builder.load_date("2026-01-15")
-        transit.save_to_disk()
-        graph_builder = transit.create_graph(with_inner_stop_transfers=True,
-                                             with_outer_stop_transfers=False,
-                                             with_walking_edges=True, distance_upper_bound=800.0,
-                                             blocking_centroid_flows=True, connector_method="nearest_neighbour",
-                                             max_connectors_per_zone=3)
+        if hasattr(builder, "set_allow_map_match"):
+            builder.set_allow_map_match(False)
+        builder.save_to_disk()
+
+        graph_builder = transit.create_graph(
+            with_inner_stop_transfers=True,
+            with_outer_stop_transfers=False,
+            with_walking_edges=True,
+            distance_upper_bound=800.0,
+            blocking_centroid_flows=True,
+            connector_method="nearest_neighbour",
+            max_connectors_per_zone=3,
+        )
         try:
             graph_builder.create_line_geometry(method="connector project match", graph="c")
         except Exception:
@@ -189,51 +116,104 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand_matrix: np.ndarra
         assignment.set_time_field("trav_time")
         assignment.set_frequency_field("freq")
         assignment.set_algorithm("os")
-        assignment.set_skimming_fields(["trav_time", "on_board_trav_time", "walking_trav_time",
-                                        "waiting_time", "transfer_time", "boardings", "transfers"])
+        assignment.set_skimming_fields([
+            "trav_time",
+            "on_board_trav_time",
+            "walking_trav_time",
+            "waiting_time",
+            "transfer_time",
+            "boardings",
+            "transfers",
+        ])
         transit_class.set_demand_matrix_core("pt")
         assignment.execute()
 
         skim = assignment.get_skim_results()["pt"].matrix
         generalized = np.zeros_like(demand, dtype=float)
-        for field, weight in (("trav_time", config.in_vehicle_weight),
-                              ("waiting_time", config.wait_weight),
-                              ("walking_trav_time", config.walk_weight)):
+        for field, weight in (
+            ("trav_time", config.in_vehicle_weight),
+            ("waiting_time", config.wait_weight),
+            ("walking_trav_time", config.walk_weight),
+        ):
             if field in skim:
                 generalized += np.nan_to_num(np.asarray(skim[field]), nan=np.inf) * weight
         if "transfers" in skim:
-            generalized += np.nan_to_num(np.asarray(skim["transfers"]), nan=np.inf) * config.transfer_penalty_min * config.transfer_weight
+            generalized += (
+                np.nan_to_num(np.asarray(skim["transfers"]), nan=np.inf)
+                * config.transfer_penalty_min
+                * config.transfer_weight
+            )
         finite = np.isfinite(generalized)
         served = float(demand[finite].sum())
         uncovered = float(demand[~finite].sum())
-        weighted_user_cost = float(np.nansum(demand[finite] * generalized[finite]) / max(served, 1.0))
-        transfer_arr = np.nan_to_num(np.asarray(skim.get("transfers", np.zeros_like(demand))), nan=0.0)
-        avg_transfers = float(np.nansum(demand * transfer_arr) / max(total, 1.0))
-        operator_km = 0.0
-        for route in route_set.routes:
-            operator_km += sum(_distance_m((float(stop_xy_lonlat[a, 0]), float(stop_xy_lonlat[a, 1])),
-                                           (float(stop_xy_lonlat[b, 0]), float(stop_xy_lonlat[b, 1]))) / 1000.0
-                               for a, b in zip(route.nodes[:-1], route.nodes[1:]))
-        score = (weighted_user_cost
-                 + avg_transfers * config.transfer_penalty_min * config.transfer_weight
-                 + uncovered * config.uncovered_demand_weight
-                 + operator_km * config.operator_route_km_weight)
-        result = Evaluation(score=float(score), user_cost=float(weighted_user_cost),
-                            operator_cost=float(operator_km), uncovered_demand=uncovered,
-                            transfers=float(avg_transfers), direct_demand_share=float(served / max(total, 1.0)),
-                            metadata={"evaluator": "AequilibraE TransitAssignment / Optimal Strategies",
-                                      "assigned_link_rows": int(len(transit_class.results.get_load_results())),
-                                      "total_demand": total, "served_demand": served,
-                                      "n_zones": int(len(centroids))})
-        result_path.write_text(json.dumps({"score": result.score, "user_cost": result.user_cost,
-                                           "operator_cost": result.operator_cost, "uncovered_demand": result.uncovered_demand,
-                                           "transfers": result.transfers, "direct_demand_share": result.direct_demand_share,
-                                           "capacity_excess": result.capacity_excess, "metadata": result.metadata},
-                                          ensure_ascii=False, indent=2), encoding="utf-8")
+        weighted_user_cost = float(
+            np.nansum(demand[finite] * generalized[finite]) / max(served, 1.0)
+        )
+        transfer_arr = np.nan_to_num(
+            np.asarray(skim.get("transfers", np.zeros_like(demand))), nan=0.0
+        )
+        result = Evaluation(
+            score=weighted_user_cost + uncovered * config.uncovered_demand_weight,
+            uncovered_demand=uncovered,
+            direct_demand_share=float(served / max(total, 1.0)),
+            metadata={
+                "evaluator": "AequilibraE",
+                "served_demand": served,
+                "weighted_user_cost_min": weighted_user_cost,
+                "average_transfers": float(
+                    np.nansum(demand[finite] * transfer_arr[finite]) / max(served, 1.0)
+                ),
+                "routes": len(route_set.routes),
+            },
+        )
+        result_path.write_text(json.dumps(result.__dict__, ensure_ascii=False), encoding="utf-8")
         return result
     finally:
         if project is not None:
-            project.close()
+            try:
+                project.close()
+            except Exception:
+                pass
         shutil.rmtree(temp_root, ignore_errors=True)
-        if cache_dir is None:
-            shutil.rmtree(root, ignore_errors=True)
+
+
+def build_gtfs_from_route_set(route_set: RouteSet, stop_xy_lonlat: np.ndarray, output_zip: Path) -> Path:
+    """Build a minimal GTFS feed for a candidate route set."""
+    import csv
+    import zipfile
+
+    output_zip.parent.mkdir(parents=True, exist_ok=True)
+    files: dict[str, list[dict[str, Any]]] = {
+        "agency.txt": [{"agency_id": "TRANMODEL", "agency_name": "Tranmodel", "agency_url": "https://example.com", "agency_timezone": "Europe/Moscow"}],
+        "routes.txt": [],
+        "stops.txt": [],
+        "trips.txt": [],
+        "stop_times.txt": [],
+        "calendar.txt": [{"service_id": "WKD", "monday": 1, "tuesday": 1, "wednesday": 1, "thursday": 1, "friday": 1, "saturday": 1, "sunday": 1, "start_date": "20260101", "end_date": "20261231"}],
+    }
+
+    used_stops = sorted({int(node) for route in route_set.routes for node in route.nodes})
+    for node in used_stops:
+        lon, lat = map(float, stop_xy_lonlat[node])
+        files["stops.txt"].append({"stop_id": str(node), "stop_name": f"Stop {node}", "stop_lat": lat, "stop_lon": lon})
+
+    for ridx, route in enumerate(route_set.routes, start=1):
+        route_id = f"R{ridx}"
+        files["routes.txt"].append({"route_id": route_id, "agency_id": "TRANMODEL", "route_short_name": route_id, "route_long_name": route_id, "route_type": 3})
+        files["trips.txt"].append({"route_id": route_id, "service_id": "WKD", "trip_id": f"T{ridx}"})
+        for seq, node in enumerate(route.nodes):
+            files["stop_times.txt"].append({"trip_id": f"T{ridx}", "arrival_time": f"08:{seq:02d}:00", "departure_time": f"08:{seq:02d}:30", "stop_id": str(node), "stop_sequence": seq + 1})
+
+    with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for name, rows in files.items():
+            if not rows:
+                continue
+            columns = list(rows[0].keys())
+            lines: list[str] = []
+            import io
+            buffer = io.StringIO()
+            writer = csv.DictWriter(buffer, fieldnames=columns, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(rows)
+            zf.writestr(name, buffer.getvalue())
+    return output_zip
