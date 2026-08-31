@@ -38,16 +38,20 @@ def build_route_vehicle_plan(*, route_id: str, route_length_km: float,
 def build_route_vehicle_plan_auto(*, route_id: str, route_length_km: float,
                                   period_peak_flows: Sequence[float],
                                   allowed_vehicle_types: Sequence[str], **kwargs) -> dict:
-    """Choose the least-cost feasible vehicle against the worst assigned period flow."""
+    """Choose the least-cost vehicle against the worst assigned period flow."""
     peak_flow = max((float(x) for x in period_peak_flows), default=0.0)
+    selector_keys = {
+        "speed_kmh", "interval_reserve_sec", "terminal_delay_reserve",
+        "charging_min_per_terminal", "annual_days", "park_trip_coefficient", "frequency_profile"
+    }
+    selector_kwargs = {k: v for k, v in kwargs.items() if k in selector_keys}
     code, _ = select_vehicle_for_route(max_section_flow_pph=peak_flow, route_length_km=float(route_length_km),
-                                       allowed_vehicle_types=allowed_vehicle_types,
-                                       **{k: v for k, v in kwargs.items() if k in {
-                                           "speed_kmh", "interval_reserve_sec", "terminal_delay_reserve",
-                                           "charging_min_per_terminal", "annual_days", "park_trip_coefficient",
-                                           "frequency_profile"}})
+                                       allowed_vehicle_types=allowed_vehicle_types, **selector_kwargs)
+    # frequency_profile belongs to vehicle-selection compatibility only; the
+    # canonical six-period profile is already supplied by ``periods``.
+    plan_kwargs = {k: v for k, v in kwargs.items() if k != "frequency_profile"}
     return build_route_vehicle_plan(route_id=route_id, route_length_km=route_length_km,
-                                    period_peak_flows=period_peak_flows, vehicle_type=code, **kwargs)
+                                    period_peak_flows=period_peak_flows, vehicle_type=code, **plan_kwargs)
 
 
 def build_network_vehicle_plan(route_specs: Sequence[dict], **kwargs) -> dict:
