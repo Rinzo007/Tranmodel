@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Sequence
 import numpy as np
 from .interval_profile import DEFAULT_INTERVAL_PROFILE
-from .model import Route, RouteSet
+from .model import RouteSet
 from .vehicle_types import VEHICLE_TYPES, calculate_route_operations
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +54,7 @@ def select_vehicle_for_route(*, max_section_flow_pph: float, route_length_km: fl
     profile = frequency_profile or tuple((p.hours,p.frequency_factor) for p in DEFAULT_INTERVAL_PROFILE)
     candidates=[]
     for code in allowed_vehicle_types:
+        if code not in VEHICLE_TYPES: continue
         details=calculate_route_operations(route_length_km=route_length_km,max_section_flow_pph=max_section_flow_pph,vehicle_type=code,speed_kmh=speed_kmh,interval_reserve_sec=interval_reserve_sec,terminal_delay_reserve=terminal_delay_reserve,charging_min_per_terminal=charging_min_per_terminal,annual_days=annual_days,park_trip_coefficient=park_trip_coefficient,frequency_profile=profile)
         annual_cost=float(details["annual_total_operating_cost_mln"])
         candidates.append((annual_cost,float(details["interval_min"]),code,details))
