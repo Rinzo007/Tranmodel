@@ -7,6 +7,7 @@ from .interval_profile import DEFAULT_INTERVAL_PROFILE, IntervalPeriod
 from .model import Evaluation, Route, RouteSet
 from .period_assignment import PeriodAssignment
 from .aequilibrae_eval import evaluate_route_set_aequilibrae
+from .peak_fleet import reconcile_route_periods
 
 
 def _period_key(p: IntervalPeriod) -> str:
@@ -40,10 +41,9 @@ def evaluate_route_set_aequilibrae_periods(
 ) -> Evaluation:
     """Evaluate one route set with six genuinely separate transit assignments.
 
-    Demand and frequencies are period-specific. The two peak periods use the
-    unscaled peak frequency, interpeak periods use 0.8, and evening uses 0.5.
-    Demand factors are keyed by period number when supplied, avoiding the
-    ambiguity caused by three periods sharing the name ``Межпик``.
+    Each period gets its own OD demand and frequency multiplier. After all six
+    assignments, the maximum assigned section flow per route is used to build
+    one common fleet envelope and a single daily/annual operating plan.
     """
     notify = progress or (lambda _msg: None)
     period_rows: list[PeriodAssignment] = []
@@ -52,8 +52,9 @@ def evaluate_route_set_aequilibrae_periods(
     weighted = {k: 0.0 for k in ("user_cost", "waiting_time", "walking_time", "transfers", "direct_demand_share")}
     total_uncovered = 0.0
     max_capacity_excess = 0.0
+    route_period_flows = [[0.0 for _ in DEFAULT_INTERVAL_PROFILE] for _ in route_set.routes]
 
-    for p in DEFAULT_INTERVAL_PROFILE:
+    for pi, p in enumerate(DEFAULT_INTERVAL_PROFILE):
         key = _period_key(p)
         raw_factor = None
         if demand_factors:
@@ -84,6 +85,9 @@ def evaluate_route_set_aequilibrae_periods(
         weighted["walking_time"] += float(em.get("walking_time", 0.0) or 0.0) * weight
         total_uncovered += ev.uncovered_demand * p.hours
         max_capacity_excess = max(max_capacity_excess, ev.capacity_excess)
+        rows = em.get("route_characteristics") or []
+        for ri in range(min(len(route_period_flows), len(rows))):
+            route_period_flows[ri][pi] = float(rows[ri].get("max_section_flow_pph", 0.0) or 0.0)
         period_rows.append(PeriodAssignment(
             period=key, user_cost=ev.user_cost,
             waiting_time=float(em.get("waiting_time", 0.0) or 0.0),
@@ -112,22 +116,58 @@ def evaluate_route_set_aequilibrae_periods(
             "uncovered_demand_hours": total_uncovered,
         },
         "period_frequency_profile": [
-            {"period_id": _period_key(p), "name": p.name, "start": p.start,
-             "end": p.end, "factor": p.frequency_factor, "hours": p.hours}
+            {"period_id": _period_key(p), "name": p.name, "start": p.start, "end": p.end,
+             "factor": p.frequency_factor, "hours": p.hours}
             for p in DEFAULT_INTERVAL_PROFILE
         ],
     }
-    # Preserve route-level economic information from the best full evaluation;
-    # the optimizer receives the six-period passenger metrics above.
     if best_base is not None:
         for row in period_meta:
             if row["period_id"] == best_base.period:
                 meta.update(dict(row["evaluation"].get("metadata") or {}))
                 break
+
+    # Reconcile the six assigned maximum-section flows into one physical fleet
+    # envelope. A route may require more vehicles in one peak than in another,
+    # but the network owns only the simultaneous peak fleet.
+    route_plans = []
+    route_lengths = []
+    route_period_details = []
+    try:
+        cached_characteristics = []
+        for row in period_meta:
+            cached_characteristics.append(row["evaluation"].get("metadata", {}).get("route_characteristics", []))
+        for ri, route in enumerate(route_set.routes):
+            one_way_lengths = [float(x["one_way_length_km"]) for x in cached_characteristics[0][ri:ri+1] if isinstance(x, dict) and "one_way_length_km" in x]
+            length = one_way_lengths[0] if one_way_lengths else 0.0
+            if length > 0:
+                reconciliation = reconcile_route_periods(
+                    route_length_km=length,
+                    period_peak_flows=route_period_flows[ri],
+                    vehicle_type=route.vehicle_type,
+                    periods=DEFAULT_INTERVAL_PROFILE,
+                    speed_kmh=config.speed_kmh,
+                    interval_reserve_sec=config.interval_reserve_sec,
+                    terminal_delay_reserve=config.terminal_delay_reserve,
+                    charging_min_per_terminal=config.charging_min_per_terminal,
+                    annual_days=config.annual_days,
+                    park_trip_coefficient=config.park_trip_coefficient,
+                )
+                route_plans.append(reconciliation)
+                route_period_details.append(reconciliation.get("periods", []))
+                route_lengths.append(length)
+    except (KeyError, IndexError, TypeError, ValueError):
+        route_plans = []
+
+    if route_plans:
+        meta["route_peak_reconciliation"] = route_plans
+        meta["peak_fleet_reconciled"] = int(sum(int(x.get("peak_fleet", 0)) for x in route_plans))
+        meta["reconciled_annual_mileage_km"] = float(sum(float(x.get("annual_mileage_km", 0.0)) for x in route_plans))
+        meta["reconciled_annual_hours"] = float(sum(float(x.get("annual_hours", 0.0)) for x in route_plans))
     return Evaluation(
         score=0.0,
         user_cost=weighted["user_cost"] / norm,
-        operator_cost=float(meta.get("annual_mileage_km", 0.0) or 0.0),
+        operator_cost=float(meta.get("reconciled_annual_mileage_km", meta.get("annual_mileage_km", 0.0)) or 0.0),
         uncovered_demand=total_uncovered,
         transfers=weighted["transfers"] / norm,
         direct_demand_share=weighted["direct_demand_share"] / norm,
