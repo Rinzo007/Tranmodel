@@ -8,7 +8,7 @@ import geopandas as gpd
 import numpy as np
 
 from config import CACHE_DIR, LAYERS_DIR, REPORT_DIR
-from src.aequilibrae_pipeline import _open_project, build_project
+from src.aequilibrae_pipeline import build_project
 from .aequilibrae_eval import AequilibraEEvaluationError, evaluate_route_set_aequilibrae
 from .candidates import generate_route_candidates
 from .corridors import extract_demand_corridors
@@ -27,65 +27,51 @@ def _stop_graph_and_inputs():
     road_graph = build_tndp_graph(roads)
     _, stop_mapping, _ = snap_stops_to_graph(road_graph, stops)
     stop_graph = add_stop_nodes(road_graph, stop_mapping, k_neighbors=8)
-    stop_proj = stops.to_crs("EPSG:4326")
-    stop_xy = np.column_stack([
-        stop_proj.geometry.x.to_numpy(dtype=float),
-        stop_proj.geometry.y.to_numpy(dtype=float),
+
+    projected = stops.to_crs("EPSG:32637").reset_index(drop=True)
+    stop_xy_km = np.column_stack([
+        projected.geometry.x.to_numpy(dtype=float) / 1000.0,
+        projected.geometry.y.to_numpy(dtype=float) / 1000.0,
     ])
-    terminal_nodes = set(np.flatnonzero(stops["is_terminal"].fillna(False).to_numpy()).tolist())
-    return demand, stops, stop_graph, stop_xy, terminal_nodes
+    lonlat = stops.to_crs("EPSG:4326").reset_index(drop=True)
+    stop_xy_lonlat = np.column_stack([
+        lonlat.geometry.x.to_numpy(dtype=float),
+        lonlat.geometry.y.to_numpy(dtype=float),
+    ])
+    terminal_nodes = set(np.flatnonzero(
+        stops["is_terminal"].fillna(False).to_numpy()
+    ).tolist())
+    return demand, stops, stop_graph, stop_xy_km, stop_xy_lonlat, terminal_nodes
 
 
-def _evaluate_with_aequilibrae(
-    route_set: RouteSet,
-    demand: np.ndarray,
-    stop_xy: np.ndarray,
-    project_path,
-    config: NetworkDesignConfig,
-) -> Evaluation:
-    if route_set.route_count() == 0:
-        return Evaluation(
-            score=float(demand.sum() * config.uncovered_demand_weight),
-            uncovered_demand=float(demand.sum()),
-            direct_demand_share=0.0,
-            metadata={"evaluator": "empty-network baseline"},
-        )
-    return evaluate_route_set_aequilibrae(
-        route_set,
-        demand,
-        stop_xy,
-        project_path,
-        config,
-        cache_dir=EVAL_CACHE,
+def _empty_evaluation(demand: np.ndarray, config: NetworkDesignConfig) -> Evaluation:
+    total = float(demand.sum())
+    return Evaluation(
+        score=total * config.uncovered_demand_weight,
+        uncovered_demand=total,
+        direct_demand_share=0.0,
+        metadata={"evaluator": "empty-network baseline"},
     )
 
 
-def run_tndp(
-    config: NetworkDesignConfig | None = None,
-    *,
-    full_assignment: bool = True,
-) -> dict:
-    """Generate a route network from OD demand.
+def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool = True) -> dict:
+    """Generate and optimize a public-transport network from the OD matrix.
 
-    Candidate screening is performed with the fast surrogate. The best
-    singleton candidates are then evaluated with the actual AequilibraE
-    TransitAssignment/Optimal Strategies procedure. The optimizer operates on
-    that full evaluator, so every accepted network change is validated by a
-    public-transport assignment.
+    Candidate construction is screened cheaply. The selected network is then
+    evaluated with AequilibraE Transit/Optimal Strategies and improved through
+    whole-route replacement, extension, shortening and removal mutations.
     """
     config = config or NetworkDesignConfig()
-    demand, stops, graph, stop_xy, terminal_nodes = _stop_graph_and_inputs()
+    config.validate()
+    demand, stops, graph, stop_xy_km, stop_xy_lonlat, terminal_nodes = _stop_graph_and_inputs()
+
     corridors = extract_demand_corridors(
-        demand,
-        stop_xy,
-        top_pairs=config.corridor_top_pairs,
+        demand, stop_xy_km, top_pairs=config.corridor_top_pairs,
         max_distance_km=config.corridor_distance_km,
     )
     demand_vector = demand.sum(axis=1) + demand.sum(axis=0)
     candidates = generate_route_candidates(
-        corridors,
-        graph,
-        stop_xy,
+        corridors, graph, stop_xy_km,
         node_ids=list(range(len(stops))),
         demand_vector=demand_vector,
         terminal_nodes=terminal_nodes,
@@ -94,41 +80,38 @@ def run_tndp(
     if not candidates:
         raise RuntimeError("TNDP generated no feasible route candidates")
 
-    # Avoid running a full TransitAssignment for hundreds of weak candidates.
-    # Score one-route sets cheaply, then keep a controlled shortlist.
-    singleton_scores = []
-    for route in candidates:
-        ev = surrogate_evaluator(demand, stop_xy, RouteSet([route]), config)
-        singleton_scores.append((ev.score, route))
-    singleton_scores.sort(key=lambda x: x[0])
-    shortlist_n = min(
-        len(singleton_scores),
-        max(config.candidate_limit_per_corridor * 4, config.min_routes * 3, 24),
+    # Screen the large candidate pool once. This avoids a full AequilibraE
+    # TransitAssignment for every weak route.
+    singleton = sorted(
+        ((surrogate_evaluator(demand, stop_xy_km, RouteSet([r]), config).score, r)
+         for r in candidates),
+        key=lambda x: x[0],
     )
-    shortlist = [route for _, route in singleton_scores[:shortlist_n]]
+    shortlist_n = min(len(singleton), max(config.min_routes * 3,
+                                          config.candidate_limit_per_corridor * 4,
+                                          24))
+    shortlist = [r for _, r in singleton[:shortlist_n]]
 
     if full_assignment:
         project_path = build_project(force=False)
 
         def evaluator(route_set: RouteSet):
-            try:
-                return _evaluate_with_aequilibrae(
-                    route_set, demand, stop_xy, project_path, config
-                )
-            except AequilibraEEvaluationError:
-                raise
+            return evaluate_route_set_aequilibrae(
+                route_set, demand, stop_xy_lonlat, project_path, config,
+                cache_dir=EVAL_CACHE,
+            ) if route_set.route_count() else _empty_evaluation(demand, config)
     else:
-        project_path = None
-        evaluator = lambda route_set: surrogate_evaluator(demand, stop_xy, route_set, config)
+        evaluator = lambda route_set: surrogate_evaluator(demand, stop_xy_km, route_set, config)
 
     optimizer = TNDPOptimizer(shortlist, evaluator, config)
-    result = optimizer.solve()
+    result = optimizer.solve(graph=graph)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     route_path = save_route_set(result.routes, OUTPUT_DIR / "generated_routes.json")
     (OUTPUT_DIR / "history.json").write_text(
         json.dumps(result.history, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    ev = result.evaluation
     report = {
         "backend": "Tranmodel TNDP solver",
         "n_stops": int(len(stops)),
@@ -137,41 +120,35 @@ def run_tndp(
         "n_candidates": int(len(candidates)),
         "n_screened_candidates": int(len(shortlist)),
         "n_routes": int(result.routes.route_count()),
-        "score": float(result.evaluation.score),
-        "user_cost": float(result.evaluation.user_cost),
-        "direct_demand_share": float(result.evaluation.direct_demand_share),
-        "uncovered_demand": float(result.evaluation.uncovered_demand),
-        "transfers": float(result.evaluation.transfers),
-        "operator_route_km": float(result.evaluation.operator_cost),
+        "score": float(ev.score),
+        "user_cost": float(ev.user_cost),
+        "direct_demand_share": float(ev.direct_demand_share),
+        "uncovered_demand": float(ev.uncovered_demand),
+        "transfers": float(ev.transfers),
+        "operator_route_km": float(ev.operator_cost),
+        "capacity_excess": float(ev.capacity_excess),
         "route_set": str(route_path),
-        "evaluator": result.evaluation.metadata.get("evaluator", "unknown"),
+        "evaluator": ev.metadata.get("evaluator", "unknown"),
         "full_assignment": bool(full_assignment),
     }
     (OUTPUT_DIR / "tndp_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    (REPORT_DIR / "tndp_report.md").write_text(
-        "\n".join([
-            "# TNDP — синтез маршрутной сети",
-            "",
-            f"- Остановок-кандидатов: **{report['n_stops']:,}**",
-            f"- Терминальных остановок: **{report['n_terminals']:,}**",
-            f"- OD-коридоров: **{report['n_corridors']:,}**",
-            f"- Кандидатных маршрутов: **{report['n_candidates']:,}**",
-            f"- Кандидатов после быстрого отбора: **{report['n_screened_candidates']:,}**",
-            f"- Итоговых маршрутов: **{report['n_routes']:,}**",
-            f"- Доля обслуженного спроса: **{report['direct_demand_share'] * 100:.1f}%**",
-            f"- Необслуженный спрос: **{report['uncovered_demand']:,.1f}**",
-            f"- Средние пересадки: **{report['transfers']:.2f}**",
-            f"- Пользовательская стоимость: **{report['user_cost']:.2f} мин/поездку**",
-            f"- Суммарная длина маршрутов: **{report['operator_route_km']:.1f} км**",
-            "",
-            "## Оценивание",
-            f"- Полное назначение AequilibraE: **{'да' if report['full_assignment'] else 'нет'}**",
-            f"- Оценщик: **{report['evaluator']}**",
-            "",
-            "Принятые изменения маршрутной сети проверяются через общественно-транспортное назначение AequilibraE.",
-        ]),
-        encoding="utf-8",
-    )
+    (REPORT_DIR / "tndp_report.md").write_text("\n".join([
+        "# TNDP — синтез маршрутной сети", "",
+        f"- Остановок-кандидатов: **{report['n_stops']:,}**",
+        f"- Терминальных остановок: **{report['n_terminals']:,}**",
+        f"- OD-коридоров: **{report['n_corridors']:,}**",
+        f"- Кандидатных маршрутов: **{report['n_candidates']:,}**",
+        f"- После предварительного отбора: **{report['n_screened_candidates']:,}**",
+        f"- Итоговых маршрутов: **{report['n_routes']:,}**",
+        f"- Доля обслуженного спроса: **{report['direct_demand_share'] * 100:.1f}%**",
+        f"- Необслуженный спрос: **{report['uncovered_demand']:,.1f}**",
+        f"- Средние пересадки: **{report['transfers']:.2f}**",
+        f"- Пользовательская стоимость: **{report['user_cost']:.2f}**",
+        f"- Суммарная длина маршрутов: **{report['operator_route_km']:.1f} км**",
+        f"- Оценщик: **{report['evaluator']}**",
+        "",
+        "Поиск выполняется целыми маршрутами; локальные операции: remove, extend, shorten, replace.",
+    ]), encoding="utf-8")
     return report
