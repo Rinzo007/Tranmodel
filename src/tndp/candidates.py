@@ -9,7 +9,7 @@ import numpy as np
 
 from .corridors import DemandCorridor
 from .model import NetworkDesignConfig, Route
-from .route_economics import calculate_route_characteristics
+from .route_economics import choose_vehicle_type
 
 
 def _shortest_path(graph: nx.Graph, origin: int, destination: int) -> tuple[list[int], float]:
@@ -30,9 +30,8 @@ def _insert_high_demand_nodes(graph: nx.Graph, base_path: list[int], demand_vect
     variants = [base_path]
     if len(base_path) >= config.max_stops:
         return variants
-    path_nodes = set(base_path)
     candidates = sorted(
-        (n for n in graph.nodes if n not in path_nodes),
+        (n for n in graph.nodes if n not in set(base_path)),
         key=lambda n: demand_vector[node_to_idx[n]] if n in node_to_idx else 0.0,
         reverse=True,
     )[: max(20, config.candidate_limit_per_corridor * 4)]
@@ -60,11 +59,11 @@ def _insert_high_demand_nodes(graph: nx.Graph, base_path: list[int], demand_vect
 def generate_route_candidates(corridors: list[DemandCorridor], graph: nx.Graph, node_xy_km: np.ndarray,
                               node_ids: list[int] | None = None, demand_vector: np.ndarray | None = None,
                               terminal_nodes: set[int] | None = None, config: NetworkDesignConfig | None = None) -> list[Route]:
-    """Generate directed route candidates on the real road graph.
+    """Generate directed route candidates and select an economical vehicle type for each.
 
-    Corridor demand is used as the default maximum-section flow input. The
-    resulting route frequency is calculated from flow/capacity and the
-    operating interval rule, rather than using a fixed 6 vph value.
+    For every feasible candidate the maximum-section corridor flow is used to
+    compare all configured rolling-stock types. The selected type determines
+    capacity, frequency, interval, release, fleet and lifecycle cost.
     """
     config = config or NetworkDesignConfig()
     if node_ids is None:
@@ -107,19 +106,12 @@ def generate_route_candidates(corridors: list[DemandCorridor], graph: nx.Graph, 
             if sig in signatures:
                 continue
             signatures.add(sig)
-            chars = calculate_route_characteristics(
+
+            chars = choose_vehicle_type(
                 2.0 * vlen,
                 corridor.demand,
-                capacity_at_4_ppm2=config.capacity_at_4_ppm2,
+                config.allowed_vehicle_types,
                 speed_kmh=config.speed_kmh,
-                interval_reserve_sec=config.interval_reserve_sec,
-                terminal_delay_reserve=config.terminal_delay_reserve,
-                charging_min_per_terminal=config.charging_min_per_terminal,
-                technical_readiness=(
-                    config.electric_technical_readiness
-                    if config.default_vehicle_type == "electric_transit"
-                    else config.bus_technical_readiness
-                ),
                 frequency_profile=config.frequency_profile,
             )
             routes.append(Route(
@@ -127,6 +119,6 @@ def generate_route_candidates(corridors: list[DemandCorridor], graph: nx.Graph, 
                 route_id=f"cand_{len(routes)+1:05d}",
                 frequency_vph=chars.frequency_vph,
                 max_section_flow_pph=float(corridor.demand),
-                vehicle_type=config.default_vehicle_type,
+                vehicle_type=chars.vehicle_type,
             ))
     return routes
