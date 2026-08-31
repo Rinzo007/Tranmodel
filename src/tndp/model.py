@@ -34,7 +34,7 @@ class Route:
 
 @dataclass
 class RouteSet:
-    """A collection of routes with canonical duplicate handling."""
+    """A collection of directed routes with exact duplicate handling."""
 
     routes: list[Route] = field(default_factory=list)
 
@@ -52,9 +52,9 @@ class RouteSet:
         return len(self.routes)
 
     def contains_nodes(self, nodes: Iterable[int]) -> bool:
-        target = tuple(nodes)
-        reverse = tuple(reversed(target))
-        return any(r.nodes == target or r.nodes == reverse for r in self.routes)
+        """Check exact directed stop sequence; reverse direction is distinct."""
+        target = tuple(int(n) for n in nodes)
+        return any(r.nodes == target for r in self.routes)
 
     def unique_undirected_signatures(self) -> set[tuple[int, ...]]:
         return {min(r.nodes, tuple(reversed(r.nodes))) for r in self.routes}
