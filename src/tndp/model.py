@@ -9,7 +9,6 @@ from typing import Iterable
 @dataclass(frozen=True, slots=True)
 class Route:
     """Directed transit route represented by ordered stop indices."""
-
     nodes: tuple[int, ...]
     route_id: str | None = None
     frequency_vph: float = 6.0
@@ -34,8 +33,6 @@ class Route:
 
 @dataclass
 class RouteSet:
-    """A collection of directed routes with exact duplicate handling."""
-
     routes: list[Route] = field(default_factory=list)
 
     def add(self, route: Route) -> None:
@@ -61,8 +58,6 @@ class RouteSet:
 
 @dataclass(frozen=True, slots=True)
 class Evaluation:
-    """Objective-function result for a complete route-set evaluation."""
-
     score: float
     user_cost: float = 0.0
     operator_cost: float = 0.0
@@ -75,8 +70,6 @@ class Evaluation:
 
 @dataclass(frozen=True, slots=True)
 class NetworkDesignConfig:
-    """Constraints and weights for TNDP search."""
-
     min_routes: int = 10
     max_routes: int = 40
     min_stops: int = 5
@@ -109,10 +102,12 @@ class NetworkDesignConfig:
     local_search_rounds: int = 4
     mutations_per_route: int = 12
     full_evaluation: bool = True
-    # Number of fast-scored additions/mutations that receive the expensive
-    # AequilibraE evaluation. Keeping this >1 avoids committing to a route
-    # solely because the surrogate happened to rank it first.
     full_candidates_per_iteration: int = 3
+    # Beam parameters keep several promising network states alive.
+    beam_width: int = 3
+    beam_expansion_per_state: int = 4
+    # Only a bounded number of top states receive exact transit assignment.
+    full_states_per_iteration: int = 3
 
     def validate(self) -> None:
         if self.min_routes < 0 or self.max_routes < self.min_routes:
@@ -129,3 +124,7 @@ class NetworkDesignConfig:
             raise ValueError("vehicle_capacity must be positive")
         if self.full_candidates_per_iteration < 1:
             raise ValueError("full_candidates_per_iteration must be positive")
+        if self.beam_width < 1 or self.beam_expansion_per_state < 1:
+            raise ValueError("beam_width and beam_expansion_per_state must be positive")
+        if self.full_states_per_iteration < 1:
+            raise ValueError("full_states_per_iteration must be positive")
