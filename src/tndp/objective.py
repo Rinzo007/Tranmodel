@@ -1,13 +1,10 @@
-"""Multi-criteria TNDP objective helpers.
-
-All components are expressed in passenger/minute, passenger equivalents,
-or million currency units so they can be combined with explicit weights.
-"""
+"""Transparent multi-criteria objective and hard constraints for TNDP."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+from math import isfinite
 
-from .model import Evaluation, NetworkDesignConfig
+from .model import Evaluation, NetworkDesignConfig, RouteSet
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,30 +17,66 @@ class ObjectiveComponents:
     duplication: float = 0.0
     walk_cost: float = 0.0
     wait_cost: float = 0.0
+    contract_cost: float = 0.0
+    amortization: float = 0.0
 
 
 def combine_objective(c: ObjectiveComponents, config: NetworkDesignConfig) -> float:
-    """Return the scalar TNDP objective used by both fast and exact stages."""
     return (
-        c.user_cost
-        + c.walk_cost * config.walk_weight
-        + c.wait_cost * config.wait_weight
-        + c.transfers * config.transfer_weight * config.transfer_penalty_min
-        + c.uncovered_demand * config.uncovered_demand_weight
-        + c.capacity_excess * config.capacity_excess_weight
-        + c.operator_cost * config.operator_route_km_weight
-        + c.duplication * config.duplication_weight
+        c.user_cost * config.objective_user_time_weight
+        + c.walk_cost * config.objective_walk_weight
+        + c.wait_cost * config.objective_wait_weight
+        + c.transfers * config.objective_transfer_weight
+        + c.uncovered_demand * config.objective_uncovered_weight
+        + c.capacity_excess * config.objective_overload_weight
+        + c.operator_cost * config.objective_operating_weight
+        + c.duplication * config.objective_route_duplication_weight
+        + c.contract_cost * config.objective_contract_weight
+        + c.amortization * config.objective_amortization_weight
     )
 
 
 def evaluation_from_components(c: ObjectiveComponents, config: NetworkDesignConfig, *, metadata=None) -> Evaluation:
-    score = combine_objective(c, config)
-    return Evaluation(
-        score=score,
-        user_cost=c.user_cost,
-        operator_cost=c.operator_cost,
-        uncovered_demand=c.uncovered_demand,
-        transfers=c.transfers,
-        capacity_excess=c.capacity_excess,
-        metadata=metadata or {},
-    )
+    return Evaluation(score=combine_objective(c, config), user_cost=c.user_cost, operator_cost=c.operator_cost,
+                      uncovered_demand=c.uncovered_demand, transfers=c.transfers,
+                      capacity_excess=c.capacity_excess, metadata=metadata or {})
+
+
+def apply_objective(route_set: RouteSet, evaluation: Evaluation, config: NetworkDesignConfig) -> Evaluation:
+    """Apply policy weights and hard service constraints to a physical evaluation."""
+    meta = dict(evaluation.metadata or {})
+    contract = float(meta.get("annual_contract_cost_mln", 0.0) or 0.0)
+    amortization = float(meta.get("annual_amortization_mln", 0.0) or 0.0)
+    walk = float(meta.get("walking_cost", meta.get("walking_time", 0.0)) or 0.0)
+    wait = float(meta.get("waiting_cost", meta.get("waiting_time", 0.0)) or 0.0)
+    duplication = float(max(0, route_set.route_count() - len(route_set.unique_undirected_signatures())))
+    c = ObjectiveComponents(max(0.0, float(evaluation.user_cost)), max(0.0, float(evaluation.operator_cost)),
+        max(0.0, float(evaluation.uncovered_demand)), max(0.0, float(evaluation.transfers)),
+        max(0.0, float(evaluation.capacity_excess)), duplication, max(0.0, walk), max(0.0, wait),
+        max(0.0, contract), max(0.0, amortization))
+    violations: list[str] = []
+    if route_set.route_count() < config.min_routes: violations.append(f"routes<{config.min_routes}")
+    if route_set.route_count() > config.max_routes: violations.append(f"routes>{config.max_routes}")
+    if evaluation.direct_demand_share < config.min_direct_demand_share: violations.append(f"direct_share<{config.min_direct_demand_share:.3f}")
+    if evaluation.transfers > config.max_average_transfers: violations.append(f"average_transfers>{config.max_average_transfers:.3f}")
+    if contract > config.max_annual_contract_cost_mln: violations.append(f"annual_contract_cost>{config.max_annual_contract_cost_mln:.3f}")
+    fleet = int(float(meta.get("fleet", 0) or 0))
+    if fleet > config.max_fleet: violations.append(f"fleet>{config.max_fleet}")
+    coverage = float(meta.get("coverage_share", 1.0) or 0.0)
+    if coverage < config.min_coverage_share: violations.append(f"coverage<{config.min_coverage_share:.3f}")
+    for i, route in enumerate(route_set.routes):
+        if route.frequency_vph < config.min_frequency_vph: violations.append(f"route[{i}].frequency<min")
+        if route.frequency_vph > config.max_frequency_vph: violations.append(f"route[{i}].frequency>max")
+        if len(route.nodes) < config.min_stops: violations.append(f"route[{i}].stops<min")
+        if len(route.nodes) > config.max_stops: violations.append(f"route[{i}].stops>max")
+    penalty = 1e9 + 1e6 * len(violations) if violations else 0.0
+    base = combine_objective(c, config)
+    score = base + penalty
+    if not isfinite(score): score = 1e15; violations.append("non_finite_objective")
+    meta.update({"objective_components": asdict(c), "objective_base_score": base,
+                 "objective_penalty": penalty, "feasible": not violations,
+                 "constraint_violations": violations})
+    return Evaluation(score=float(score), user_cost=evaluation.user_cost, operator_cost=evaluation.operator_cost,
+                      uncovered_demand=evaluation.uncovered_demand, transfers=evaluation.transfers,
+                      direct_demand_share=evaluation.direct_demand_share, capacity_excess=evaluation.capacity_excess,
+                      metadata=meta)
