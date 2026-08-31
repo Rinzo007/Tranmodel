@@ -1,18 +1,12 @@
-"""AequilibraE-backed network pipeline.
-
-The road graph is independent from demand zones and public-transport stops.
-Transport zones provide OD centroids; transit stops remain transit entities.
-"""
+"""AequilibraE-backed network pipeline."""
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 from pathlib import Path
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 from shapely.geometry import LineString
 
@@ -22,6 +16,8 @@ from src.zones import build_transport_zones
 AEQ_DIR = CACHE_DIR / "aequilibrae"
 GMNS_DIR = AEQ_DIR / "gmns"
 PROJECT_DIR = AEQ_DIR / "project"
+BUILD_VERSION = "tranmodel-aeq-v3-directed-road-graph"
+VERSION_FILE = PROJECT_DIR / "tranmodel_build_version.txt"
 
 DEFAULT_SPEED_KMH = {
     "motorway": 90.0, "motorway_link": 50.0, "trunk": 70.0, "trunk_link": 40.0,
@@ -57,10 +53,7 @@ def _parse_speed(value, highway: str | None) -> float:
 
 
 def _direction(oneway) -> int:
-    if oneway:
-        value = str(oneway).strip().lower()
-    else:
-        value = ""
+    value = str(oneway).strip().lower() if oneway else ""
     if value in {"yes", "true", "1"}:
         return 1
     if value == "-1":
@@ -73,7 +66,7 @@ def _node_key(x: float, y: float) -> tuple[float, float]:
 
 
 def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Convert the real road network and zone centroids to GMNS."""
+    """Convert the real road network and transport-zone centroids to GMNS."""
     roads = roads.to_crs("EPSG:4326").explode(index_parts=False, ignore_index=True)
     zones = zones.to_crs("EPSG:4326").copy()
     node_ids: dict[tuple[float, float], int] = {}
@@ -82,9 +75,8 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame) -> tuple[pd.
 
     def node_id(x: float, y: float) -> int:
         key = _node_key(x, y)
-        existing = node_ids.get(key)
-        if existing is not None:
-            return existing
+        if key in node_ids:
+            return node_ids[key]
         nid = len(node_ids) + 1
         node_ids[key] = nid
         node_rows.append({"node_id": nid, "node_type": "", "x_coord": key[0], "y_coord": key[1]})
@@ -98,33 +90,25 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame) -> tuple[pd.
     ):
         if geom is None or geom.is_empty or geom.geom_type != "LineString":
             continue
-        pts = list(geom.coords)
-        for a, b in zip(pts[:-1], pts[1:]):
+        for a, b in zip(list(geom.coords)[:-1], list(geom.coords)[1:]):
             if a[:2] == b[:2]:
                 continue
-            d = _direction(oneway)
-            if d == -1:
-                a, b, d = b, a, 1
+            direction = _direction(oneway)
+            if direction == -1:
+                a, b = b, a
             a_id, b_id = node_id(a[0], a[1]), node_id(b[0], b[1])
             speed = _parse_speed(maxspeed, highway)
             try:
                 lane_count = max(1.0, float(str(lanes).split(";")[0]))
             except (TypeError, ValueError):
                 lane_count = DEFAULT_LANES
-            length_m = float(LineString([a, b]).length)
             link_rows.append({
-                "link_id": next_link,
-                "from_node_id": a_id,
-                "to_node_id": b_id,
-                "directed": int(d != 0),
-                "direction": d,
-                "length": length_m,
-                "speed": speed,
-                "capacity": lane_count * CAPACITY_PER_LANE,
-                "lanes": lane_count,
+                "link_id": next_link, "from_node_id": a_id, "to_node_id": b_id,
+                "directed": int(direction != 0), "direction": direction,
+                "length": float(LineString([a, b]).length), "speed": speed,
+                "capacity": lane_count * CAPACITY_PER_LANE, "lanes": lane_count,
                 "link_type": str(highway or "unclassified"),
-                "name": "" if pd.isna(name) else str(name),
-                "modes": "c",
+                "name": "" if pd.isna(name) else str(name), "modes": "c",
                 "geometry": LineString([a, b]).wkt,
             })
             next_link += 1
@@ -132,12 +116,8 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame) -> tuple[pd.
     centroid_start = 9_000_000_000
     for pos, (_, row) in enumerate(zones.iterrows()):
         point = row.geometry.centroid
-        node_rows.append({
-            "node_id": centroid_start + pos + 1,
-            "node_type": "centroid",
-            "x_coord": float(point.x),
-            "y_coord": float(point.y),
-        })
+        node_rows.append({"node_id": centroid_start + pos + 1, "node_type": "centroid",
+                          "x_coord": float(point.x), "y_coord": float(point.y)})
     return pd.DataFrame(node_rows), pd.DataFrame(link_rows)
 
 
@@ -145,12 +125,9 @@ def _write_gmns_files(nodes: pd.DataFrame, links: pd.DataFrame, force: bool) -> 
     GMNS_DIR.mkdir(parents=True, exist_ok=True)
     node_path, link_path = GMNS_DIR / "nodes.csv", GMNS_DIR / "links.csv"
     rewrite_links = force or not link_path.exists()
-    if link_path.exists():
-        existing_columns = pd.read_csv(link_path, nrows=0).columns
-        if "directed" not in existing_columns:
-            rewrite_links = True
-    rewrite_nodes = force or not node_path.exists()
-    if rewrite_nodes:
+    if link_path.exists() and "directed" not in pd.read_csv(link_path, nrows=0).columns:
+        rewrite_links = True
+    if force or not node_path.exists():
         nodes.to_csv(node_path, index=False)
     if rewrite_links:
         links.to_csv(link_path, index=False)
@@ -164,6 +141,14 @@ def build_project(force: bool = False) -> Path:
     if not roads_path.exists():
         raise FileNotFoundError(f"Road layer not found: {roads_path}")
 
+    if PROJECT_DIR.exists() and not force:
+        try:
+            current_version = VERSION_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            current_version = ""
+        if current_version != BUILD_VERSION:
+            shutil.rmtree(PROJECT_DIR)
+
     zones = build_transport_zones(force=False)
     roads = gpd.read_parquet(roads_path)
     if force and PROJECT_DIR.exists():
@@ -174,9 +159,7 @@ def build_project(force: bool = False) -> Path:
     if not PROJECT_DIR.exists():
         project = Project()
         project.new(PROJECT_DIR)
-        project.network.create_from_gmns(
-            link_file_path=str(link_path), node_file_path=str(node_path), srid=4326,
-        )
+        project.network.create_from_gmns(link_file_path=str(link_path), node_file_path=str(node_path), srid=4326)
         centroid_ids = nodes.loc[nodes["node_type"] == "centroid", "node_id"].astype(int)
         for cid in centroid_ids:
             node = project.network.nodes.get(int(cid))
@@ -187,4 +170,5 @@ def build_project(force: bool = False) -> Path:
         project.network.nodes.save()
         project.network.links.save()
         project.close()
+        VERSION_FILE.write_text(BUILD_VERSION, encoding="utf-8")
     return PROJECT_DIR
