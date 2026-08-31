@@ -90,7 +90,8 @@ def run_tndp(config=None, *, full_assignment=True, progress=None):
 
     if full_assignment:
         notify("Подготавливаем проект AequilibraE...")
-        project_path = build_project(force=False)
+        project_path = build_project(force=False, progress=notify)
+        notify("Проект AequilibraE готов. Запускаем оптимизацию маршрутной сети...")
         def evaluator(route_set):
             if not route_set.route_count():
                 return _empty_evaluation(demand, config)
