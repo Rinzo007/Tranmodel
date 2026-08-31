@@ -25,7 +25,7 @@ Progress = Callable[[str], None]
 
 
 class TNDPOptimizer:
-    """Construct routes cheaply, then use the expensive evaluator only on selected networks."""
+    """Construct routes with a cheap screen and spend AequilibraE calls selectively."""
 
     def __init__(self, candidates: list[Route], evaluator: Evaluator,
                  config: NetworkDesignConfig | None = None,
@@ -38,14 +38,43 @@ class TNDPOptimizer:
         self.config.validate()
         self.progress = progress
         self._graph = None
+        self._fast_cache: dict[tuple, Evaluation] = {}
+        self._full_cache: dict[tuple, Evaluation] = {}
+
+    @staticmethod
+    def _key(network: RouteSet) -> tuple:
+        return tuple((r.nodes, round(float(r.frequency_vph), 6)) for r in network.routes)
 
     def _evaluate(self, network: RouteSet, full: bool = True) -> Evaluation:
-        return (self.evaluator if full else self.fast_evaluator)(network)
+        cache = self._full_cache if full else self._fast_cache
+        key = self._key(network)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        evaluator = self.evaluator if full else self.fast_evaluator
+        result = evaluator(network)
+        cache[key] = result
+        return result
 
     def _notify(self, message: str) -> None:
         if self.progress:
             self.progress(message)
         print(f"[TNDP] {message}", flush=True)
+
+    def _rank_additions(self, network: RouteSet, remaining: list[Route]) -> list[tuple[float, RouteSet, Route]]:
+        ranked: list[tuple[float, RouteSet, Route]] = []
+        total = len(remaining)
+        for idx, route in enumerate(remaining, 1):
+            if network.contains_nodes(route.nodes):
+                continue
+            trial = network.copy()
+            trial.add(route)
+            ev = self._evaluate(trial, full=False)
+            ranked.append((ev.score, trial, route))
+            if idx % 10 == 0:
+                self._notify(f"  быстрый отбор: {idx}/{total}")
+        ranked.sort(key=lambda x: x[0])
+        return ranked
 
     def solve(self, initial: RouteSet | None = None, graph=None) -> TNDPResult:
         self._graph = graph
@@ -60,30 +89,31 @@ class TNDPOptimizer:
                 break
 
             self._notify(f"Построение: итерация {iteration + 1}/{self.config.iterations}, сеть {network.route_count()} маршрутов")
-            best_route: Route | None = None
-            best_fast_eval: Evaluation | None = None
-            for idx, route in enumerate(remaining, 1):
-                if network.contains_nodes(route.nodes):
-                    continue
-                trial = network.copy()
-                trial.add(route)
-                ev = self._evaluate(trial, full=False)
-                if best_fast_eval is None or ev.score < best_fast_eval.score:
-                    best_route, best_fast_eval = route, ev
-                if idx % 10 == 0:
-                    self._notify(f"  проверено быстрым оценщиком: {idx}/{len(remaining)}")
-
-            if best_route is None or best_fast_eval is None:
+            ranked = self._rank_additions(network, remaining)
+            if not ranked:
                 break
 
-            trial = network.copy()
-            trial.add(best_route)
-            best_eval = self._evaluate(trial, full=True)
+            # Evaluate only the best few surrogate candidates with AequilibraE.
+            # This changes the expensive-call budget from O(all candidates) to O(k).
+            top_k = min(self.config.full_candidates_per_iteration, len(ranked))
+            best_route: Route | None = None
+            best_network: RouteSet | None = None
+            best_eval: Evaluation | None = None
+            for rank, (_, trial, route) in enumerate(ranked[:top_k], 1):
+                self._notify(f"  точная оценка {rank}/{top_k}: {route.route_id or 'route'}")
+                ev = self._evaluate(trial, full=True)
+                if best_eval is None or ev.score < best_eval.score:
+                    best_route, best_network, best_eval = route, trial, ev
+
+            if best_route is None or best_network is None or best_eval is None:
+                break
+
             must_fill_min = network.route_count() < self.config.min_routes
             if not must_fill_min and best_eval.score + self.config.improvement_epsilon >= current.score:
+                self._notify("  улучшения по полной оценке больше нет — завершаем построение")
                 break
 
-            network.add(best_route)
+            network = best_network
             current = best_eval
             remaining = [r for r in remaining if r is not best_route]
             history.append({
@@ -103,22 +133,32 @@ class TNDPOptimizer:
 
         for round_no in range(1, self.config.local_search_rounds + 1):
             self._notify(f"Локальный поиск: раунд {round_no}/{self.config.local_search_rounds}")
-            best_network = network
-            best_fast_eval = self._evaluate(network, full=False)
-            best_meta = None
-
-            for trial, meta in mutate_route_set(network, self._graph, self.config):
+            ranked: list[tuple[float, RouteSet, dict]] = []
+            trials = list(mutate_route_set(network, self._graph, self.config))
+            total = len(trials)
+            for idx, (trial, meta) in enumerate(trials, 1):
                 ev = self._evaluate(trial, full=False)
-                if ev.score + self.config.improvement_epsilon < best_fast_eval.score:
-                    best_network, best_fast_eval, best_meta = trial, ev, meta
+                ranked.append((ev.score, trial, meta))
+                if idx % 10 == 0:
+                    self._notify(f"  быстрый отбор мутаций: {idx}/{total}")
+            ranked.sort(key=lambda x: x[0])
+            if not ranked:
+                break
+
+            top_k = min(self.config.full_candidates_per_iteration, len(ranked))
+            best_network = network
+            best_meta = None
+            best_full = current
+            for rank, (_, trial, meta) in enumerate(ranked[:top_k], 1):
+                self._notify(f"  точная оценка мутации {rank}/{top_k}")
+                ev = self._evaluate(trial, full=True)
+                if ev.score + self.config.improvement_epsilon < best_full.score:
+                    best_network, best_full, best_meta = trial, ev, meta
 
             if best_meta is None:
                 break
 
-            full_eval = self._evaluate(best_network, full=True)
-            if full_eval.score + self.config.improvement_epsilon >= current.score:
-                break
-            network, current = best_network, full_eval
+            network, current = best_network, best_full
             history.append({
                 "phase": "local_search", "round": round_no,
                 "routes": network.route_count(), "score": current.score,
