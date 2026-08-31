@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import heapq
 from math import inf
 
 import networkx as nx
@@ -35,7 +34,7 @@ def _insert_high_demand_nodes(
     node_to_idx: dict[int, int],
     config: NetworkDesignConfig,
 ) -> list[list[int]]:
-    """Create variants by adding high-demand nodes near the base path."""
+    """Create variants by inserting high-demand nodes into a shortest path."""
     variants = [base_path]
     if len(base_path) >= config.max_stops:
         return variants
@@ -76,13 +75,14 @@ def generate_route_candidates(
     node_xy_km: np.ndarray,
     node_ids: list[int] | None = None,
     demand_vector: np.ndarray | None = None,
+    terminal_nodes: set[int] | None = None,
     config: NetworkDesignConfig | None = None,
 ) -> list[Route]:
     """Generate a diverse route set from strongest OD corridors.
 
-    The graph must contain edge attributes ``time`` (minutes) and
-    ``length_km``. Node IDs are arbitrary; terminal constraints are handled by
-    the caller or by pre-filtering candidate origins/destinations.
+    When ``terminal_nodes`` is supplied, every candidate starts and ends at a
+    terminal. The OD corridor itself can originate/end elsewhere; the nearest
+    permitted terminal is selected in projected space.
     """
     config = config or NetworkDesignConfig()
     if node_ids is None:
@@ -90,31 +90,41 @@ def generate_route_candidates(
     node_to_idx = {int(n): i for i, n in enumerate(node_ids)}
     if demand_vector is None:
         demand_vector = np.zeros(len(node_ids), dtype=float)
+    terminal_nodes = set(map(int, terminal_nodes or set()))
+
+    if terminal_nodes:
+        terminal_array = np.asarray(sorted(terminal_nodes), dtype=int)
+        terminal_xy = node_xy_km[terminal_array]
 
     routes: list[Route] = []
     signatures: set[tuple[int, ...]] = set()
     for corridor in corridors:
-        path, length_km = _shortest_path(graph, corridor.origin, corridor.destination)
+        origin, destination = int(corridor.origin), int(corridor.destination)
+        if terminal_nodes:
+            if origin not in terminal_nodes:
+                origin = int(terminal_array[np.argmin(((terminal_xy - node_xy_km[origin]) ** 2).sum(axis=1))])
+            if destination not in terminal_nodes:
+                destination = int(terminal_array[np.argmin(((terminal_xy - node_xy_km[destination]) ** 2).sum(axis=1))])
+            if origin == destination:
+                continue
+
+        path, _ = _shortest_path(graph, origin, destination)
         if not path:
             continue
         variants = _insert_high_demand_nodes(graph, path, demand_vector, node_to_idx, config)
         variants.append(list(reversed(path)))
-        for order, variant in enumerate(variants):
+        for variant in variants:
             try:
                 vlen = float(nx.path_weight(graph, variant, weight="length_km"))
             except (nx.NetworkXNoPath, nx.NodeNotFound):
                 continue
             if not _feasible(variant, vlen, config):
                 continue
+            if terminal_nodes and (variant[0] not in terminal_nodes or variant[-1] not in terminal_nodes):
+                continue
             sig = min(tuple(variant), tuple(reversed(variant)))
             if sig in signatures:
                 continue
             signatures.add(sig)
-            routes.append(
-                Route(
-                    nodes=tuple(variant),
-                    route_id=f"cand_{len(routes)+1:05d}",
-                    frequency_vph=6.0,
-                )
-            )
+            routes.append(Route(nodes=tuple(variant), route_id=f"cand_{len(routes)+1:05d}", frequency_vph=6.0))
     return routes
