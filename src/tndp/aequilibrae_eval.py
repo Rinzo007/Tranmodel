@@ -4,6 +4,7 @@ import hashlib
 import json
 import shutil
 import tempfile
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -20,21 +21,22 @@ def _route_frequency(route: Any) -> float:
     """Return the route frequency using the current Route API."""
     value = getattr(route, "frequency_vph", None)
     if value is None:
-        # Backward compatibility with older serialized Route objects.
         value = getattr(route, "frequency", 6.0)
     return float(value)
 
 
 def _route_set_key(route_set: RouteSet) -> str:
     payload = [
-        {
-            "nodes": list(route.nodes),
-            "frequency_vph": _route_frequency(route),
-        }
+        {"nodes": list(route.nodes), "frequency_vph": _route_frequency(route)}
         for route in route_set.routes
     ]
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _evaluation_json(value: Evaluation) -> str:
+    """Serialize a slots dataclass without relying on ``__dict__``."""
+    return json.dumps(asdict(value), ensure_ascii=False, default=float, sort_keys=True)
 
 
 def evaluate_route_set_aequilibrae(
@@ -149,12 +151,8 @@ def evaluate_route_set_aequilibrae(
         transfer_arr = np.nan_to_num(
             np.asarray(skim.get("transfers", np.zeros_like(demand))), nan=0.0
         )
-        avg_transfers = float(
-            np.nansum(demand * transfer_arr) / max(total, 1.0)
-        )
-        direct_share = float(
-            demand[(finite) & (transfer_arr == 0)].sum() / max(total, 1.0)
-        )
+        avg_transfers = float(np.nansum(demand * transfer_arr) / max(total, 1.0))
+        direct_share = float(demand[(finite) & (transfer_arr == 0)].sum() / max(total, 1.0))
         operator_km = sum(
             _route_length_km(route, stop_xy_lonlat) * _route_frequency(route)
             for route in route_set.routes
@@ -166,15 +164,12 @@ def evaluate_route_set_aequilibrae(
             + avg_transfers * config.transfer_penalty_min * config.transfer_weight
         )
         evaluation = Evaluation(
-            score=float(score),
-            user_cost=weighted_user_cost,
-            operator_cost=float(operator_km),
-            uncovered_demand=uncovered,
-            transfers=avg_transfers,
-            direct_demand_share=direct_share,
+            score=float(score), user_cost=weighted_user_cost,
+            operator_cost=float(operator_km), uncovered_demand=uncovered,
+            transfers=avg_transfers, direct_demand_share=direct_share,
             metadata={"evaluator": "AequilibraE", "served_demand": served},
         )
-        result_path.write_text(json.dumps(evaluation.__dict__, ensure_ascii=False, default=float), encoding="utf-8")
+        result_path.write_text(_evaluation_json(evaluation), encoding="utf-8")
         return evaluation
     finally:
         if project is not None:
