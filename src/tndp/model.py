@@ -123,17 +123,41 @@ class NetworkDesignConfig:
     target_load_factor: float = 0.85
     peak_hours: float = 4.0
 
+    # User generalized-cost model.
     transfer_penalty_min: float = 8.0
     wait_weight: float = 1.5
     in_vehicle_weight: float = 1.0
     walk_weight: float = 2.0
     transfer_weight: float = 1.0
+
+    # Objective weights. Components are normalized by objective.py when
+    # reference values are supplied; these weights are deliberately explicit.
+    objective_user_time_weight: float = 1.0
+    objective_wait_weight: float = 1.0
+    objective_walk_weight: float = 1.0
+    objective_transfer_weight: float = 1.0
+    objective_uncovered_weight: float = 10.0
+    objective_overload_weight: float = 5.0
+    objective_operating_weight: float = 0.02
+    objective_contract_weight: float = 0.05
+    objective_amortization_weight: float = 0.05
+    objective_route_duplication_weight: float = 2.0
+
+    # Hard service constraints.
+    min_direct_demand_share: float = 0.0
+    max_average_transfers: float = 99.0
+    max_annual_contract_cost_mln: float = float("inf")
+    max_fleet: int = 100000
+    min_coverage_share: float = 0.0
+    coverage_distance_m: float = 800.0
+
     operator_route_km_weight: float = 0.02
     uncovered_demand_weight: float = 10.0
     capacity_excess_weight: float = 5.0
     duplication_weight: float = 2.0
 
     improvement_epsilon: float = 1e-6
+    stagnation_rounds: int = 3
     local_search_rounds: int = 4
     mutations_per_route: int = 12
     full_evaluation: bool = True
@@ -175,3 +199,20 @@ class NetworkDesignConfig:
             raise ValueError("beam_width and beam_expansion_per_state must be positive")
         if self.full_states_per_iteration < 1:
             raise ValueError("full_states_per_iteration must be positive")
+        if self.stagnation_rounds < 1:
+            raise ValueError("stagnation_rounds must be positive")
+        if not (0.0 <= self.min_direct_demand_share <= 1.0):
+            raise ValueError("min_direct_demand_share must be in [0, 1]")
+        if self.max_average_transfers < 0 or self.max_fleet < 0:
+            raise ValueError("Invalid hard service constraints")
+        if not (0.0 <= self.min_coverage_share <= 1.0) or self.coverage_distance_m <= 0:
+            raise ValueError("Invalid coverage constraint")
+        weights = (
+            self.objective_user_time_weight, self.objective_wait_weight,
+            self.objective_walk_weight, self.objective_transfer_weight,
+            self.objective_uncovered_weight, self.objective_overload_weight,
+            self.objective_operating_weight, self.objective_contract_weight,
+            self.objective_amortization_weight, self.objective_route_duplication_weight,
+        )
+        if any(w < 0 for w in weights):
+            raise ValueError("Objective weights cannot be negative")
