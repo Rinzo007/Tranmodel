@@ -13,23 +13,19 @@ from .multi_period import PeriodPlan, build_period_plan, summarize_period_plan
 from .operating_plan import build_network_operating_plan
 from .period_assignment import PeriodDemand, PeriodAssignment, build_period_demands, aggregate_period_assignments
 from .period_costs import route_period_costs
-from .cost_aggregation import aggregate_route_costs, aggregate_network_costs
+from .cost_aggregation import aggregate_route_costs, aggregate_network_costs, aggregate_peak_fleet
 from .multiperiod_assignment import evaluate_route_set_aequilibrae_periods
 from .peak_fleet import PeriodRouteOperation, reconcile_route_periods
-from .period_vehicle_plan import build_route_vehicle_plan, build_network_vehicle_plan
+from .period_vehicle_plan import build_route_vehicle_plan, build_route_vehicle_plan_auto, build_network_vehicle_plan
 from .period_network_plan import reconcile_period_network
 
 __all__ = [
-    "NetworkDesignConfig", "Route", "RouteSet", "Evaluation", "DemandCorridor",
-    "extract_demand_corridors", "generate_route_candidates", "TNDPOptimizer",
-    "TNDPResult", "AequilibraEEvaluationError", "evaluate_route_set_aequilibrae",
-    "ObjectiveVector", "dominates", "pareto_front", "vector_from_evaluation",
-    "ParetoArchive", "ServiceIndicators", "safe_share", "capacity_excess",
-    "ServiceMetrics", "generalized_cost", "IntervalPeriod", "DEFAULT_INTERVAL_PROFILE",
-    "daily_frequency_factor", "as_frequency_profile", "validate_profile",
-    "PeriodPlan", "build_period_plan", "summarize_period_plan", "build_network_operating_plan",
-    "PeriodDemand", "PeriodAssignment", "build_period_demands", "aggregate_period_assignments",
-    "route_period_costs", "aggregate_route_costs", "aggregate_network_costs",
-    "evaluate_route_set_aequilibrae_periods", "PeriodRouteOperation", "reconcile_route_periods",
-    "build_route_vehicle_plan", "build_network_vehicle_plan", "reconcile_period_network",
+    "NetworkDesignConfig", "Route", "RouteSet", "Evaluation", "DemandCorridor", "extract_demand_corridors", "generate_route_candidates",
+    "TNDPOptimizer", "TNDPResult", "AequilibraEEvaluationError", "evaluate_route_set_aequilibrae", "ObjectiveVector", "dominates",
+    "pareto_front", "vector_from_evaluation", "ParetoArchive", "ServiceIndicators", "safe_share", "capacity_excess", "ServiceMetrics",
+    "generalized_cost", "IntervalPeriod", "DEFAULT_INTERVAL_PROFILE", "daily_frequency_factor", "as_frequency_profile", "validate_profile",
+    "PeriodPlan", "build_period_plan", "summarize_period_plan", "build_network_operating_plan", "PeriodDemand", "PeriodAssignment",
+    "build_period_demands", "aggregate_period_assignments", "route_period_costs", "aggregate_route_costs", "aggregate_network_costs",
+    "aggregate_peak_fleet", "evaluate_route_set_aequilibrae_periods", "PeriodRouteOperation", "reconcile_route_periods",
+    "build_route_vehicle_plan", "build_route_vehicle_plan_auto", "build_network_vehicle_plan", "reconcile_period_network",
 ]
