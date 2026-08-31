@@ -20,7 +20,8 @@ from .route_economics import calculate_route_characteristics
 from .route_loads import reconstruct_route_loads, select_vehicle_for_route
 from .transit_loads import extract_transit_segment_loads
 
-EVALUATOR_VERSION = "aeq-transit-v11-exact-segment-load-fleet"
+EVALUATOR_VERSION = "aeq-transit-v12-convergent-assignment-fleet"
+MAX_ASSIGNMENT_FLEET_ITERATIONS = 3
 
 
 class AequilibraEEvaluationError(RuntimeError):
@@ -124,19 +125,27 @@ def _adapt_fleet(route_set: RouteSet, demand: np.ndarray, stop_to_zone: dict[int
     return current, details
 
 
+def _routes_changed(before: RouteSet, after: RouteSet, frequency_tolerance: float = 0.01) -> bool:
+    if before.route_count() != after.route_count():
+        return True
+    for a, b in zip(before.routes, after.routes):
+        if tuple(a.nodes) != tuple(b.nodes):
+            return True
+        if getattr(a, "vehicle_type", "bus") != getattr(b, "vehicle_type", "bus"):
+            return True
+        if abs(_route_frequency(a) - _route_frequency(b)) > frequency_tolerance:
+            return True
+    return False
+
+
 def _assignment_loads(assignment, project_dir: Path) -> dict[str, Any]:
     """Get exact transit link loads from AequilibraE and map them to route segments."""
-    try:
-        results = getattr(assignment, "assignment", None)
-        if results is None:
-            results = getattr(assignment, "results", None)
-        if results is None:
-            raise RuntimeError("TransitAssignment does not expose assignment results")
-        # TransitAssignmentResults is stored on the TransitClass in current
-        # AequilibraE versions. Prefer it because it owns link_loads.
-        return extract_transit_segment_loads(project_dir, results)
-    except Exception:
-        raise
+    results = getattr(assignment, "assignment", None)
+    if results is None:
+        results = getattr(assignment, "results", None)
+    if results is None:
+        raise RuntimeError("TransitAssignment does not expose assignment results")
+    return extract_transit_segment_loads(project_dir, results)
 
 
 def evaluate_route_set_aequilibrae(
@@ -151,7 +160,14 @@ def evaluate_route_set_aequilibrae(
     path_index=None,
     stop_to_zone: dict[int, int] | None = None,
     cache_dir: str | Path | None = None,
+    assignment_iteration: int = 0,
 ) -> Evaluation:
+    """Evaluate a route set and iteratively converge fleet/frequency with PT assignment.
+
+    Each iteration performs a real AequilibraE transit assignment. Exact segment
+    loads determine the next vehicle/frequency state. The loop stops when the
+    state is stable or MAX_ASSIGNMENT_FLEET_ITERATIONS is reached.
+    """
     total = float(np.asarray(demand, dtype=float).sum())
     if not route_set.routes:
         return Evaluation(
@@ -274,15 +290,9 @@ def evaluate_route_set_aequilibrae(
         avg_transfers = float(np.nansum(demand * transfers_arr) / max(total, 1.0))
         direct_share = float(demand[(finite) & (transfers_arr == 0)].sum() / max(total, 1.0))
 
-        # Exact AequilibraE transit assignment loads.
-        # TransitAssignmentResults.get_load_results() returns a table indexed
-        # by transit link id; transit_loads.py joins those IDs to route_links
-        # and therefore obtains the actual load on every route segment.
         exact_loads = extract_transit_segment_loads(project_dir, transit_class.results)
         exact_max = exact_loads["max_sections"]
 
-        # The exact maximum section is authoritative. Only if a route has no
-        # matched transit links do we retain the deterministic reconstruction.
         final_routes = []
         final_details = []
         for i, route in enumerate(adapted.routes):
@@ -317,7 +327,26 @@ def evaluate_route_set_aequilibrae(
                 **op,
             })
 
-        adapted = RouteSet(final_routes)
+        assigned_route_set = RouteSet(final_routes)
+
+        # Re-run the assignment when exact loads changed the service plan.
+        # This closes the feedback loop: assignment -> load -> vehicle/frequency -> assignment.
+        if assignment_iteration < MAX_ASSIGNMENT_FLEET_ITERATIONS - 1 and _routes_changed(adapted, assigned_route_set):
+            return evaluate_route_set_aequilibrae(
+                assigned_route_set,
+                demand,
+                stop_xy_lonlat,
+                project_path,
+                config,
+                road_graph=road_graph,
+                stop_mapping=stop_mapping,
+                path_index=path_index,
+                stop_to_zone=stop_to_zone,
+                cache_dir=cache_dir,
+                assignment_iteration=assignment_iteration + 1,
+            )
+
+        adapted = assigned_route_set
         annual_mileage = annual_hours = annual_contract = annual_amortization = 0.0
         fleet = 0
         route_characteristics = []
@@ -388,6 +417,9 @@ def evaluate_route_set_aequilibrae(
                 "route_characteristics": route_characteristics,
                 "assignment_segment_loads": exact_loads,
                 "segment_load_source": "AequilibraE TransitAssignmentResults",
+                "assignment_iteration": assignment_iteration + 1,
+                "assignment_fleet_converged": not _routes_changed(adapted, assigned_route_set),
+                "assignment_fleet_max_iterations": MAX_ASSIGNMENT_FLEET_ITERATIONS,
             },
         )
         result_path.write_text(_evaluation_json(evaluation), encoding="utf-8")
