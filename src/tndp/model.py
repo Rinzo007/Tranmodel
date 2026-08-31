@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from .vehicle_types import DEFAULT_VEHICLE_TYPE, VEHICLE_TYPES
+
 
 @dataclass(frozen=True, slots=True)
 class Route:
@@ -13,7 +15,7 @@ class Route:
     route_id: str | None = None
     frequency_vph: float = 6.0
     max_section_flow_pph: float = 0.0
-    vehicle_type: str = "bus"
+    vehicle_type: str = DEFAULT_VEHICLE_TYPE
 
     def __post_init__(self) -> None:
         if len(self.nodes) < 2:
@@ -24,8 +26,16 @@ class Route:
             raise ValueError("frequency_vph must be positive")
         if self.max_section_flow_pph < 0:
             raise ValueError("max_section_flow_pph cannot be negative")
-        if self.vehicle_type not in {"bus", "electric_transit"}:
-            raise ValueError("vehicle_type must be 'bus' or 'electric_transit'")
+        if self.vehicle_type not in VEHICLE_TYPES:
+            raise ValueError(f"Unknown vehicle_type: {self.vehicle_type}")
+
+    @property
+    def capacity(self) -> float:
+        return VEHICLE_TYPES[self.vehicle_type].capacity
+
+    @property
+    def technical_readiness(self) -> float:
+        return VEHICLE_TYPES[self.vehicle_type].technical_readiness
 
     def reversed(self, route_id: str | None = None) -> "Route":
         return Route(tuple(reversed(self.nodes)), route_id or self.route_id, self.frequency_vph, self.max_section_flow_pph, self.vehicle_type)
@@ -103,10 +113,9 @@ class NetworkDesignConfig:
     electric_technical_readiness: float = 0.90
     park_trip_coefficient: float = 0.90
     annual_days: int = 350
-    frequency_profile: tuple[tuple[float, float], ...] = (
-        (3.0, 1.00), (6.0, 0.75), (4.0, 1.00), (3.0, 0.60), (8.0, 0.30)
-    )
-    default_vehicle_type: str = "bus"
+    frequency_profile: tuple[tuple[float, float], ...] = ((3.0, 1.00), (6.0, 0.75), (4.0, 1.00), (3.0, 0.60), (8.0, 0.30))
+    default_vehicle_type: str = DEFAULT_VEHICLE_TYPE
+    allowed_vehicle_types: tuple[str, ...] = tuple(VEHICLE_TYPES.keys())
 
     min_frequency_vph: float = 3.0
     max_frequency_vph: float = 15.0
@@ -156,8 +165,10 @@ class NetworkDesignConfig:
             raise ValueError("Invalid annualization parameters")
         if not self.frequency_profile or any(h < 0 or m < 0 for h, m in self.frequency_profile):
             raise ValueError("Invalid frequency profile")
-        if self.default_vehicle_type not in {"bus", "electric_transit"}:
-            raise ValueError("default_vehicle_type must be 'bus' or 'electric_transit'")
+        if self.default_vehicle_type not in VEHICLE_TYPES:
+            raise ValueError("Unknown default_vehicle_type")
+        if not self.allowed_vehicle_types or any(v not in VEHICLE_TYPES for v in self.allowed_vehicle_types):
+            raise ValueError("Unknown vehicle type in allowed_vehicle_types")
         if self.full_candidates_per_iteration < 1:
             raise ValueError("full_candidates_per_iteration must be positive")
         if self.beam_width < 1 or self.beam_expansion_per_state < 1:
