@@ -2,32 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
 
-from .model import NetworkDesignConfig, Route, RouteSet
+from .model import Evaluation, NetworkDesignConfig, Route, RouteSet
 from .mutations import mutate_route_set
 
 
-@dataclass(frozen=True, slots=True)
-class Evaluation:
-    score: float
-    user_cost: float = 0.0
-    operator_cost: float = 0.0
-    uncovered_demand: float = 0.0
-    transfers: float = 0.0
-    direct_demand_share: float = 0.0
-    capacity_excess: float = 0.0
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
 class TNDPResult:
-    routes: RouteSet
-    evaluation: Evaluation
-    history: list[dict]
+    """Result of TNDP construction and local network search."""
+
+    def __init__(self, routes: RouteSet, evaluation: Evaluation, history: list[dict]):
+        self.routes = routes
+        self.evaluation = evaluation
+        self.history = history
 
 
 Evaluator = Callable[[RouteSet], Evaluation]
@@ -76,8 +65,6 @@ class TNDPOptimizer:
             if best_route is None or best_eval is None:
                 break
 
-            # Before min_routes the optimizer is required to build a valid-sized
-            # network. Afterwards it only accepts a true improvement.
             must_fill_min = network.route_count() < self.config.min_routes
             if not must_fill_min and best_eval.score + self.config.improvement_epsilon >= current.score:
                 break
@@ -115,7 +102,7 @@ class TNDPOptimizer:
                 break
 
             network, current = best_network, best_eval
-            entry = {
+            history.append({
                 "phase": "local_search",
                 "round": round_no,
                 "routes": network.route_count(),
@@ -123,8 +110,7 @@ class TNDPOptimizer:
                 "operation": best_meta["operation"],
                 "index": best_meta["index"],
                 "new_route": list(best_meta["route"].nodes),
-            }
-            history.append(entry)
+            })
 
         return network, current
 
