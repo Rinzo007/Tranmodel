@@ -16,8 +16,9 @@ from src.zones import build_transport_zones
 AEQ_DIR = CACHE_DIR / "aequilibrae"
 GMNS_DIR = AEQ_DIR / "gmns"
 PROJECT_DIR = AEQ_DIR / "project"
-BUILD_VERSION = "tranmodel-aeq-v5-topology-gmns"
-VERSION_FILE = PROJECT_DIR / "tranmodel_build_version.txt"
+TRANSIT_PROJECT_DIR = AEQ_DIR / "transit_project"
+BUILD_VERSION = "tranmodel-aeq-v6-transit-support-network"
+VERSION_FILE = TRANSIT_PROJECT_DIR / "tranmodel_build_version.txt"
 
 DEFAULT_SPEED_KMH = {
     "motorway": 90.0, "motorway_link": 50.0, "trunk": 70.0, "trunk_link": 40.0,
@@ -66,16 +67,7 @@ def _node_key(x: float, y: float) -> tuple[float, float]:
 
 
 def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame, progress=None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Convert OSM roads to a compact GMNS topology.
-
-    OSM road features are normally split at intersections.  The previous
-    implementation created a GMNS node for every geometry vertex, turning
-    32k road features into ~140k network nodes.  For the AequilibraE base
-    project we only need the actual road topology: feature endpoints are
-    sufficient because intermediate shape vertices do not represent graph
-    junctions.  The original detailed road geometry remains in roads.parquet
-    and is still used by Tranmodel for route generation and map output.
-    """
+    """Convert OSM roads to a compact GMNS topology."""
     notify = progress or (lambda _: None)
     roads = roads.to_crs("EPSG:4326").explode(index_parts=False, ignore_index=True)
     roads_metric = roads.to_crs(PROJ_EPSG)
@@ -105,30 +97,22 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame, progress=Non
     ), 1):
         if geom is None or geom.is_empty or geom.geom_type != "LineString":
             continue
-
         coords = list(geom.coords)
         if len(coords) < 2 or coords[0][:2] == coords[-1][:2]:
             continue
-
-        a = coords[0]
-        b = coords[-1]
+        a, b = coords[0], coords[-1]
         direction = _direction(oneway)
         if direction == -1:
             a, b = b, a
-
         a_id, b_id = node_id(a[0], a[1]), node_id(b[0], b[1])
         speed = _parse_speed(maxspeed, highway)
         try:
             lane_count = max(1.0, float(str(lanes).split(";")[0]))
         except (TypeError, ValueError):
             lane_count = DEFAULT_LANES
-
-        # Length must be measured in a metric CRS.  The old implementation
-        # stored degrees here, which was also incorrect for AequilibraE.
         length_m = float(metric_geom.length)
         if length_m <= 0:
             continue
-
         link_rows.append({
             "link_id": len(link_rows) + 1,
             "from_node_id": a_id,
@@ -144,7 +128,6 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame, progress=Non
             "modes": "c",
             "geometry": geom.wkt,
         })
-
         if i % 5000 == 0 or i == total:
             notify(f"GMNS: {i:,}/{total:,} объектов, {len(node_rows):,} узлов, {len(link_rows):,} связей")
 
@@ -157,13 +140,13 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame, progress=Non
             "x_coord": float(point.x),
             "y_coord": float(point.y),
         })
-
     return pd.DataFrame(node_rows), pd.DataFrame(link_rows)
 
 
-def _write_gmns_files(nodes: pd.DataFrame, links: pd.DataFrame, force: bool) -> tuple[Path, Path]:
+def _write_gmns_files(nodes: pd.DataFrame, links: pd.DataFrame, force: bool, prefix: str = "") -> tuple[Path, Path]:
     GMNS_DIR.mkdir(parents=True, exist_ok=True)
-    node_path, link_path = GMNS_DIR / "nodes.csv", GMNS_DIR / "links.csv"
+    node_path = GMNS_DIR / f"{prefix}nodes.csv"
+    link_path = GMNS_DIR / f"{prefix}links.csv"
     rewrite_links = force or not link_path.exists()
     if link_path.exists() and "directed" not in pd.read_csv(link_path, nrows=0).columns:
         rewrite_links = True
@@ -174,48 +157,21 @@ def _write_gmns_files(nodes: pd.DataFrame, links: pd.DataFrame, force: bool) -> 
     return link_path, node_path
 
 
-def _project_is_current() -> bool:
-    if not PROJECT_DIR.exists() or not VERSION_FILE.exists():
+def _project_is_current(project_dir: Path, version_file: Path) -> bool:
+    if not project_dir.exists() or not version_file.exists():
         return False
     try:
-        return VERSION_FILE.read_text(encoding="utf-8").strip() == BUILD_VERSION
+        return version_file.read_text(encoding="utf-8").strip() == BUILD_VERSION
     except OSError:
         return False
 
 
-def build_project(force: bool = False, progress=None) -> Path:
-    """Create/open the compact AequilibraE road support project."""
+def _build_from_gmns(project_dir: Path, link_path: Path, node_path: Path, nodes: pd.DataFrame, progress=None) -> Path:
     notify = progress or (lambda _: None)
     Project = _require_aequilibrae()
-
-    if not force and _project_is_current():
-        notify("Готовый проект AequilibraE найден в кэше — пересборка дорожной сети не требуется.")
-        return PROJECT_DIR
-
-    roads_path = LAYERS_DIR / "roads.parquet"
-    if not roads_path.exists():
-        raise FileNotFoundError(f"Road layer not found: {roads_path}")
-
-    if PROJECT_DIR.exists():
-        notify("Кэш проекта устарел — пересобираем дорожную сеть...")
-        shutil.rmtree(PROJECT_DIR)
-    if force and GMNS_DIR.exists():
-        shutil.rmtree(GMNS_DIR)
-
-    notify("Загружаем дорожную сеть...")
-    zones = build_transport_zones(force=False)
-    roads = gpd.read_parquet(roads_path)
-    nodes, links = roads_to_gmns(roads, zones, progress=notify)
-    notify(f"GMNS готов: {len(nodes):,} узлов, {len(links):,} связей.")
-    link_path, node_path = _write_gmns_files(nodes, links, force=force)
-
-    notify(f"Создаём проект AequilibraE: {len(nodes):,} узлов, {len(links):,} связей...")
     project = Project()
-    project.new(PROJECT_DIR)
-    project.network.create_from_gmns(
-        link_file_path=str(link_path), node_file_path=str(node_path), srid=4326
-    )
-
+    project.new(project_dir)
+    project.network.create_from_gmns(link_file_path=str(link_path), node_file_path=str(node_path), srid=4326)
     centroid_ids = nodes.loc[nodes["node_type"] == "centroid", "node_id"].astype(int)
     for cid in centroid_ids:
         node = project.network.nodes.get(int(cid))
@@ -223,10 +179,67 @@ def build_project(force: bool = False, progress=None) -> Path:
             node.connect_mode("c", connectors=3, limit_to_zone=False)
         except TypeError:
             node.connect_mode("c", connectors=3)
-
     project.network.nodes.save()
     project.network.links.save()
     project.close()
-    VERSION_FILE.write_text(BUILD_VERSION, encoding="utf-8")
     notify("Проект AequilibraE готов и сохранён в кэше.")
-    return PROJECT_DIR
+    return project_dir
+
+
+def build_project(force: bool = False, progress=None, *, mode: str = "transit") -> Path:
+    """Build a cached AequilibraE support project.
+
+    ``mode='transit'`` is the default for TNDP. It imports only the part of
+    the road network needed around transit stops/zones, while Tranmodel keeps
+    the complete road graph for route generation. ``mode='road'`` retains the
+    previous full-network behavior for future multimodal road assignment.
+    """
+    notify = progress or (lambda _: None)
+    Project = _require_aequilibrae()
+    if mode not in {"transit", "road"}:
+        raise ValueError("mode must be 'transit' or 'road'")
+
+    project_dir = TRANSIT_PROJECT_DIR if mode == "transit" else PROJECT_DIR
+    version_file = VERSION_FILE if mode == "transit" else PROJECT_DIR / "tranmodel_build_version.txt"
+    if not force and _project_is_current(project_dir, version_file):
+        notify("Готовый проект AequilibraE найден в кэше — импорт дорожной сети не требуется.")
+        return project_dir
+
+    roads_path = LAYERS_DIR / "roads.parquet"
+    if not roads_path.exists():
+        raise FileNotFoundError(f"Road layer not found: {roads_path}")
+    if project_dir.exists():
+        notify("Кэш проекта устарел — пересобираем поддержку AequilibraE...")
+        shutil.rmtree(project_dir)
+
+    notify("Загружаем данные для проекта AequilibraE...")
+    zones = build_transport_zones(force=False)
+    roads = gpd.read_parquet(roads_path)
+
+    if mode == "transit":
+        stops_path = CACHE_DIR / "phase1_real" / "stops_demand.parquet"
+        if not stops_path.exists():
+            raise FileNotFoundError(f"Stops layer not found: {stops_path}")
+        stops = gpd.read_parquet(stops_path).to_crs(PROJ_EPSG)
+        # AequilibraE needs a road/walking support graph for transit
+        # connectors. Keep only a generous corridor around actual stops and
+        # zone centroids; the complete road graph remains outside AequilibraE.
+        anchors = gpd.GeoSeries(
+            list(stops.geometry) + list(zones.to_crs(PROJ_EPSG).geometry.centroid),
+            crs=PROJ_EPSG,
+        )
+        support_area = anchors.buffer(1500.0).unary_union
+        roads_metric = roads.to_crs(PROJ_EPSG)
+        mask = roads_metric.geometry.intersects(support_area)
+        roads = roads.loc[mask].copy()
+        notify(f"Дорожная сеть для Transit-проекта сокращена до {len(roads):,} объектов вокруг остановок и зон.")
+
+    nodes, links = roads_to_gmns(roads, zones, progress=notify)
+    notify(f"GMNS готов: {len(nodes):,} узлов, {len(links):,} связей.")
+    prefix = "transit_" if mode == "transit" else ""
+    link_path, node_path = _write_gmns_files(nodes, links, force=force, prefix=prefix)
+    notify(f"Создаём {mode}-проект AequilibraE: {len(nodes):,} узлов, {len(links):,} связей...")
+    _build_from_gmns(project_dir, link_path, node_path, nodes, progress=notify)
+    version_file.parent.mkdir(parents=True, exist_ok=True)
+    version_file.write_text(BUILD_VERSION, encoding="utf-8")
+    return project_dir
