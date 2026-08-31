@@ -9,6 +9,7 @@ from .pareto import ObjectiveVector, dominates, pareto_front, vector_from_evalua
 from .pareto_archive import ParetoArchive
 from .service_indicators import ServiceIndicators, safe_share, capacity_excess
 from .service_metrics import ServiceMetrics, generalized_cost
+from .interval_profile import IntervalPeriod, DEFAULT_INTERVAL_PROFILE, daily_frequency_factor, validate_profile
 from .multi_period import PeriodPlan, build_period_plan, summarize_period_plan
 from .operating_plan import build_network_operating_plan
 
@@ -18,6 +19,7 @@ __all__ = [
     "TNDPResult", "AequilibraEEvaluationError", "evaluate_route_set_aequilibrae",
     "ObjectiveVector", "dominates", "pareto_front", "vector_from_evaluation",
     "ParetoArchive", "ServiceIndicators", "safe_share", "capacity_excess",
-    "ServiceMetrics", "generalized_cost", "PeriodPlan", "build_period_plan",
+    "ServiceMetrics", "generalized_cost", "IntervalPeriod", "DEFAULT_INTERVAL_PROFILE",
+    "daily_frequency_factor", "validate_profile", "PeriodPlan", "build_period_plan",
     "summarize_period_plan", "build_network_operating_plan",
 ]
