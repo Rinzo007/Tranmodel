@@ -7,7 +7,9 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import networkx as nx
 from pyproj import Transformer
 
-_PROJECTED_TO_WGS84 = Transformer.from_crs("EPSG:32637", "EPSG:4326", always_xy=True)
+from config import PROJ_EPSG
+
+_PROJECTED_TO_WGS84 = Transformer.from_crs(PROJ_EPSG, "EPSG:4326", always_xy=True)
 
 
 def _frequency(route: Any) -> float:
