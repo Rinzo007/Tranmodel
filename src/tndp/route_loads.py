@@ -1,5 +1,4 @@
 """Route-segment passenger load reconstruction and fleet selection."""
-
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
@@ -7,6 +6,7 @@ import numpy as np
 from .interval_profile import DEFAULT_INTERVAL_PROFILE
 from .model import RouteSet
 from .vehicle_types import VEHICLE_TYPES, calculate_route_operations
+from .cost_aggregation import aggregate_route_costs
 
 @dataclass(frozen=True, slots=True)
 class RouteLoad:
@@ -50,13 +50,16 @@ def reconstruct_route_loads(route_set: RouteSet, demand: np.ndarray, *, stop_to_
 
 
 def select_vehicle_for_route(*, max_section_flow_pph: float, route_length_km: float, allowed_vehicle_types: Sequence[str], speed_kmh: float=18.0, interval_reserve_sec: float=20.0, terminal_delay_reserve: float=.08, charging_min_per_terminal: float=10.0, annual_days: int=350, park_trip_coefficient: float=.90, frequency_profile=None) -> tuple[str, dict]:
-    """Select the vehicle with the lowest full annual route cost."""
+    """Select the vehicle with the lowest complete annual cost for the assigned peak flow."""
     profile = frequency_profile or tuple((p.hours,p.frequency_factor) for p in DEFAULT_INTERVAL_PROFILE)
     candidates=[]
     for code in allowed_vehicle_types:
         if code not in VEHICLE_TYPES: continue
         details=calculate_route_operations(route_length_km=route_length_km,max_section_flow_pph=max_section_flow_pph,vehicle_type=code,speed_kmh=speed_kmh,interval_reserve_sec=interval_reserve_sec,terminal_delay_reserve=terminal_delay_reserve,charging_min_per_terminal=charging_min_per_terminal,annual_days=annual_days,park_trip_coefficient=park_trip_coefficient,frequency_profile=profile)
-        annual_cost=float(details["annual_total_operating_cost_mln"])
-        candidates.append((annual_cost,float(details["interval_min"]),code,details))
+        op_cost=aggregate_route_costs(vehicle_type=code,annual_km=details["annual_mileage_km"],fleet=int(details["fleet"]),annual_hours=details["annual_in_service_hours"],annual_contract_mln=details.get("annual_fleet_contract_cost_mln",0.0),annual_amortization_mln=details.get("annual_fleet_amortization_mln",0.0))
+        annual_cost=float(op_cost["total_annual_mln"])
+        enriched=dict(details)
+        enriched.update({"annual_total_operating_cost_mln":annual_cost, "economic_breakdown":op_cost})
+        candidates.append((annual_cost,float(details["interval_min"]),code,enriched))
     if not candidates: raise ValueError("No vehicle types available")
     _,_,code,details=min(candidates,key=lambda x:(x[0],x[1])); return code,details
