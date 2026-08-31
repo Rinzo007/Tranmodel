@@ -84,8 +84,20 @@ def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool
 
     if full_assignment:
         project_path = build_project(force=False)
-        evaluator = lambda route_set: (_empty_evaluation(demand, config) if not route_set.route_count() else
-            evaluate_route_set_aequilibrae(route_set, demand, stop_lonlat_xy, project_path, config, cache_dir=EVAL_CACHE))
+
+        def evaluator(route_set: RouteSet) -> Evaluation:
+            if not route_set.route_count():
+                return _empty_evaluation(demand, config)
+            return evaluate_route_set_aequilibrae(
+                route_set,
+                demand,
+                stop_lonlat_xy,
+                project_path,
+                config,
+                road_graph=road_graph,
+                stop_mapping=stop_mapping,
+                cache_dir=EVAL_CACHE,
+            )
     else:
         evaluator = lambda route_set: surrogate_evaluator(demand, zone_xy, route_set, config, zone_to_stop, stop_xy)
 
