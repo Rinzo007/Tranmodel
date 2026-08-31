@@ -17,6 +17,12 @@ CITY_OSM_RELATION = 1144811
 # UTM zone for Voronezh: 37N
 PROJ_EPSG = 32637
 
+# --- Reference public transport network ---
+# Tracked in the repository so the model does not depend on a developer-local
+# D:\... path. The GeoJSON contains the reference stop points, route numbers,
+# terminal flags, and route membership used by phase1_real/phase3_real.
+REFERENCE_ROUTES_PATH = ROOT / "voronezh_routes_terminals.geojson"
+
 # --- Nominatim ---
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_LOOKUP_URL = "https://nominatim.openstreetmap.org/lookup"
