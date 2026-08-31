@@ -1,0 +1,9 @@
+geopandas
+pandas
+numpy
+scipy
+shapely
+networkx
+folium
+streamlit
+pyarrow
