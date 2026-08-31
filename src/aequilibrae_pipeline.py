@@ -10,13 +10,13 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry import LineString
 
-from config import CACHE_DIR, LAYERS_DIR
+from config import CACHE_DIR, LAYERS_DIR, PROJ_EPSG
 from src.zones import build_transport_zones
 
 AEQ_DIR = CACHE_DIR / "aequilibrae"
 GMNS_DIR = AEQ_DIR / "gmns"
 PROJECT_DIR = AEQ_DIR / "project"
-BUILD_VERSION = "tranmodel-aeq-v4-cached-road-network"
+BUILD_VERSION = "tranmodel-aeq-v5-topology-gmns"
 VERSION_FILE = PROJECT_DIR / "tranmodel_build_version.txt"
 
 DEFAULT_SPEED_KMH = {
@@ -66,10 +66,21 @@ def _node_key(x: float, y: float) -> tuple[float, float]:
 
 
 def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame, progress=None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Convert the real road network and transport-zone centroids to GMNS."""
+    """Convert OSM roads to a compact GMNS topology.
+
+    OSM road features are normally split at intersections.  The previous
+    implementation created a GMNS node for every geometry vertex, turning
+    32k road features into ~140k network nodes.  For the AequilibraE base
+    project we only need the actual road topology: feature endpoints are
+    sufficient because intermediate shape vertices do not represent graph
+    junctions.  The original detailed road geometry remains in roads.parquet
+    and is still used by Tranmodel for route generation and map output.
+    """
     notify = progress or (lambda _: None)
     roads = roads.to_crs("EPSG:4326").explode(index_parts=False, ignore_index=True)
+    roads_metric = roads.to_crs(PROJ_EPSG)
     zones = zones.to_crs("EPSG:4326").copy()
+
     node_ids: dict[tuple[float, float], int] = {}
     node_rows: list[dict] = []
     link_rows: list[dict] = []
@@ -83,46 +94,70 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame, progress=Non
         node_rows.append({"node_id": nid, "node_type": "", "x_coord": key[0], "y_coord": key[1]})
         return nid
 
-    next_link = 1
-    empty = pd.Series(index=roads.index, dtype=object)
     total = len(roads)
-    notify(f"Строим GMNS из {total:,} дорожных объектов...")
-    for i, (geom, highway, maxspeed, oneway, lanes, name) in enumerate(zip(
-        roads.geometry, roads.get("highway", empty), roads.get("maxspeed", empty),
-        roads.get("oneway", empty), roads.get("lanes", empty), roads.get("name", empty),
+    empty = pd.Series(index=roads.index, dtype=object)
+    notify(f"Строим компактный GMNS из {total:,} дорожных объектов...")
+
+    for i, (geom, metric_geom, highway, maxspeed, oneway, lanes, name) in enumerate(zip(
+        roads.geometry, roads_metric.geometry, roads.get("highway", empty),
+        roads.get("maxspeed", empty), roads.get("oneway", empty),
+        roads.get("lanes", empty), roads.get("name", empty),
     ), 1):
         if geom is None or geom.is_empty or geom.geom_type != "LineString":
             continue
-        for a, b in zip(list(geom.coords)[:-1], list(geom.coords)[1:]):
-            if a[:2] == b[:2]:
-                continue
-            direction = _direction(oneway)
-            if direction == -1:
-                a, b = b, a
-            a_id, b_id = node_id(a[0], a[1]), node_id(b[0], b[1])
-            speed = _parse_speed(maxspeed, highway)
-            try:
-                lane_count = max(1.0, float(str(lanes).split(";")[0]))
-            except (TypeError, ValueError):
-                lane_count = DEFAULT_LANES
-            link_rows.append({
-                "link_id": next_link, "from_node_id": a_id, "to_node_id": b_id,
-                "directed": int(direction != 0), "direction": direction,
-                "length": float(LineString([a, b]).length), "speed": speed,
-                "capacity": lane_count * CAPACITY_PER_LANE, "lanes": lane_count,
-                "link_type": str(highway or "unclassified"),
-                "name": "" if pd.isna(name) else str(name), "modes": "c",
-                "geometry": LineString([a, b]).wkt,
-            })
-            next_link += 1
-        if i % 10000 == 0 or i == total:
+
+        coords = list(geom.coords)
+        if len(coords) < 2 or coords[0][:2] == coords[-1][:2]:
+            continue
+
+        a = coords[0]
+        b = coords[-1]
+        direction = _direction(oneway)
+        if direction == -1:
+            a, b = b, a
+
+        a_id, b_id = node_id(a[0], a[1]), node_id(b[0], b[1])
+        speed = _parse_speed(maxspeed, highway)
+        try:
+            lane_count = max(1.0, float(str(lanes).split(";")[0]))
+        except (TypeError, ValueError):
+            lane_count = DEFAULT_LANES
+
+        # Length must be measured in a metric CRS.  The old implementation
+        # stored degrees here, which was also incorrect for AequilibraE.
+        length_m = float(metric_geom.length)
+        if length_m <= 0:
+            continue
+
+        link_rows.append({
+            "link_id": len(link_rows) + 1,
+            "from_node_id": a_id,
+            "to_node_id": b_id,
+            "directed": int(direction != 0),
+            "direction": direction,
+            "length": length_m,
+            "speed": speed,
+            "capacity": lane_count * CAPACITY_PER_LANE,
+            "lanes": lane_count,
+            "link_type": str(highway or "unclassified"),
+            "name": "" if pd.isna(name) else str(name),
+            "modes": "c",
+            "geometry": geom.wkt,
+        })
+
+        if i % 5000 == 0 or i == total:
             notify(f"GMNS: {i:,}/{total:,} объектов, {len(node_rows):,} узлов, {len(link_rows):,} связей")
 
     centroid_start = 9_000_000_000
     for pos, (_, row) in enumerate(zones.iterrows()):
         point = row.geometry.centroid
-        node_rows.append({"node_id": centroid_start + pos + 1, "node_type": "centroid",
-                          "x_coord": float(point.x), "y_coord": float(point.y)})
+        node_rows.append({
+            "node_id": centroid_start + pos + 1,
+            "node_type": "centroid",
+            "x_coord": float(point.x),
+            "y_coord": float(point.y),
+        })
+
     return pd.DataFrame(node_rows), pd.DataFrame(link_rows)
 
 
@@ -149,13 +184,10 @@ def _project_is_current() -> bool:
 
 
 def build_project(force: bool = False, progress=None) -> Path:
-    """Create/open the AequilibraE road project using cached GMNS data."""
+    """Create/open the compact AequilibraE road support project."""
     notify = progress or (lambda _: None)
     Project = _require_aequilibrae()
 
-    # Critical performance path: do not even read the 100+ MB road layer when
-    # a valid AequilibraE project already exists. This function used to rebuild
-    # the GMNS representation on every TNDP launch despite having a cache.
     if not force and _project_is_current():
         notify("Готовый проект AequilibraE найден в кэше — пересборка дорожной сети не требуется.")
         return PROJECT_DIR
@@ -177,12 +209,13 @@ def build_project(force: bool = False, progress=None) -> Path:
     notify(f"GMNS готов: {len(nodes):,} узлов, {len(links):,} связей.")
     link_path, node_path = _write_gmns_files(nodes, links, force=force)
 
-    notify("Создаём проект AequilibraE и импортируем дорожную сеть...")
+    notify(f"Создаём проект AequilibraE: {len(nodes):,} узлов, {len(links):,} связей...")
     project = Project()
     project.new(PROJECT_DIR)
     project.network.create_from_gmns(
         link_file_path=str(link_path), node_file_path=str(node_path), srid=4326
     )
+
     centroid_ids = nodes.loc[nodes["node_type"] == "centroid", "node_id"].astype(int)
     for cid in centroid_ids:
         node = project.network.nodes.get(int(cid))
@@ -190,6 +223,7 @@ def build_project(force: bool = False, progress=None) -> Path:
             node.connect_mode("c", connectors=3, limit_to_zone=False)
         except TypeError:
             node.connect_mode("c", connectors=3)
+
     project.network.nodes.save()
     project.network.links.save()
     project.close()
