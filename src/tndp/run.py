@@ -39,8 +39,6 @@ def _load_inputs():
     stop_xy = np.column_stack([stops.geometry.x.to_numpy(dtype=float), stops.geometry.y.to_numpy(dtype=float)]) / 1000.0
     zone_points = zones.geometry.centroid
     zone_xy = np.column_stack([zone_points.x.to_numpy(dtype=float), zone_points.y.to_numpy(dtype=float)]) / 1000.0
-    # Keep several nearest stops per zone for future demand assignment; the first
-    # remains the deterministic fast-screening representative.
     zone_tree = cKDTree(stop_xy)
     _, zone_to_stops = zone_tree.query(zone_xy, k=min(4, len(stops)))
     zone_to_stops = np.atleast_2d(zone_to_stops)
@@ -92,7 +90,6 @@ def run_tndp(config=None, *, full_assignment=True, progress=None):
         raise RuntimeError("TNDP generated no feasible route candidates")
     notify(f"Сгенерировано {len(candidates)} кандидатных маршрутов")
 
-    # Precompute only stop pairs actually occurring in candidate routes.
     stop_pairs = {(a, b) for route in candidates for a, b in zip(route.nodes[:-1], route.nodes[1:])}
     path_index = build_stop_path_index(road_graph, stop_mapping, stop_pairs, PATH_CACHE)
     notify(f"Кэш путей остановка→остановка: {len(path_index.paths):,} сегментов")
@@ -122,12 +119,15 @@ def run_tndp(config=None, *, full_assignment=True, progress=None):
     geojson_path = routes_to_geojson(result.routes, stops, OUTPUT_DIR / "generated_routes.geojson", road_graph=road_graph, stop_to_road_node=stop_mapping)
     (OUTPUT_DIR / "history.json").write_text(json.dumps(result.history, ensure_ascii=False, indent=2), encoding="utf-8")
     ev = result.evaluation
+    route_characteristics = ev.metadata.get("route_characteristics", []) if isinstance(ev.metadata, dict) else []
     report = {
         "backend": "Tranmodel TNDP solver", "demand_units": "transport zones", "transit_units": "transit stops", "network_units": "real road graph",
         "n_zones": int(len(zones)), "n_stops": int(len(stops)), "n_terminals": int(len(terminal_nodes)), "n_corridors": int(len(zone_corridors)),
         "n_candidates": int(len(candidates)), "n_screened_candidates": int(len(shortlist)), "n_routes": int(result.routes.route_count()),
         "score": float(ev.score), "user_cost": float(ev.user_cost), "direct_demand_share": float(ev.direct_demand_share), "uncovered_demand": float(ev.uncovered_demand),
-        "transfers": float(ev.transfers), "operator_route_km": float(ev.operator_cost), "capacity_excess": float(ev.capacity_excess),
+        "transfers": float(ev.transfers), "operator_annual_mileage_km": float(ev.operator_cost), "capacity_excess": float(ev.capacity_excess),
+        "annual_in_service_hours": float(ev.metadata.get("annual_in_service_hours", 0.0)), "fleet": int(ev.metadata.get("fleet", 0)),
+        "route_characteristics": route_characteristics,
         "route_set": str(route_path), "route_geojson": str(geojson_path), "evaluator": ev.metadata.get("evaluator", "unknown"), "full_assignment": bool(full_assignment),
     }
     (OUTPUT_DIR / "tndp_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
