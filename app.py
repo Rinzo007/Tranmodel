@@ -1,15 +1,10 @@
-"""Streamlit UI for the Voronezh transport model.
-
-The AequilibraE backend is exposed as the new computational phase while the
-legacy phases remain available for comparison during migration.
-"""
+"""Streamlit UI for the Voronezh transport model."""
 
 import json
 from pathlib import Path
 
 import folium
 import geopandas as gpd
-import pandas as pd
 import streamlit as st
 from streamlit.components.v1 import html
 
@@ -61,7 +56,8 @@ if phase == "Обзор":
     st.markdown(
         "Модель использует OSM и WorldPop для подготовки спроса. "
         "Основной новый расчётный контур построен на AequilibraE: "
-        "сетевая стоимость, гравитационное распределение и назначение."
+        "сетевая стоимость, гравитационное распределение и назначение "
+        "автомобильного и общественного транспорта."
     )
     rep = load_named_json("aequilibrae/aequilibrae_report.json")
     p0 = load_named_json("phase0_report.json")
@@ -72,6 +68,11 @@ if phase == "Обзор":
         c2.metric("Узлов", f"{rep['n_nodes']:,}")
         c3.metric("Рёбер", f"{rep['n_links']:,}")
         c4.metric("Матрица OD", f"{rep['total_demand']:,.0f}")
+        if rep.get("transit"):
+            st.success(
+                f"Общественный транспорт: {rep['transit']['n_routes']:,} маршрутов, "
+                f"{rep['transit']['assigned_link_rows']:,} загруженных рёбер."
+            )
     elif p0 or p1:
         c1, c2 = st.columns(2)
         c1.metric("Население", f"{(p0 or {}).get('population', {}).get('total', 0):,.0f}")
@@ -79,27 +80,29 @@ if phase == "Обзор":
     st.info("Для нового расчёта откройте раздел «AequilibraE».")
 
 elif phase == "AequilibraE":
-    st.title("AequilibraE — основной расчётный контур")
+    st.title("AequilibraE — автомобиль + общественный транспорт")
     st.write(
-        "Создаётся проект AequilibraE из кэшированной дорожной сети и остановок, "
-        "затем считаются сетевые скримы, гравитационная матрица EXPO/IPF и "
-        "назначение BPR/BFW."
+        "Сначала строится дорожный граф, рассчитываются сетевые скримы и "
+        "гравитационная матрица EXPO/IPF. Затем та же матрица назначается "
+        "на дорожную сеть и на реальную маршрутную сеть из "
+        "voronezh_routes_terminals.geojson через GTFS/TransitGraph."
     )
 
-    from src.aequilibrae_pipeline import AequilibraEPipelineError, run_all
+    from src.aequilibrae_full import TransitPipelineError, run_full_model
+    from src.aequilibrae_pipeline import AequilibraEPipelineError
 
     c1, c2 = st.columns(2)
-    run_button = c1.button("Запустить расчёт AequilibraE", type="primary")
+    run_button = c1.button("Запустить полный расчёт", type="primary")
     force = c2.checkbox("Пересобрать проект с нуля", value=False)
 
     if run_button:
-        with st.spinner("AequilibraE выполняет сетевые скримы, распределение и назначение..."):
+        with st.spinner("AequilibraE рассчитывает OD, дорожное назначение и пассажиропоток ОТ..."):
             try:
-                report = run_all(force=force)
-                st.success("Расчёт AequilibraE завершён.")
+                report = run_full_model(force=force)
+                st.success("Полный расчёт AequilibraE завершён.")
                 st.json(report)
                 st.cache_data.clear()
-            except (AequilibraEPipelineError, FileNotFoundError, ValueError) as exc:
+            except (AequilibraEPipelineError, TransitPipelineError, FileNotFoundError, ValueError) as exc:
                 st.error(str(exc))
             except Exception as exc:
                 st.exception(exc)
@@ -109,13 +112,23 @@ elif phase == "AequilibraE":
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Центроидов", f"{report['n_centroids']:,}")
         c2.metric("Узлов", f"{report['n_nodes']:,}")
-        c3.metric("Рёбер", f"{report['n_links']:,}")
+        c3.metric("Дорожных рёбер", f"{report['n_links']:,}")
         c4.metric("Объём OD", f"{report['total_demand']:,.0f}")
+        if report.get("transit"):
+            tr = report["transit"]
+            st.subheader("Общественный транспорт")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Маршрутов", f"{tr['n_routes']:,}")
+            c2.metric("Остановок", f"{tr['n_stops']:,}")
+            c3.metric("Рёбер маршрутов", f"{tr['n_route_links']:,}")
+            c4.metric("Назначенных рёбер", f"{tr['assigned_link_rows']:,}")
         st.markdown(load_report_md("aequilibrae_report.md"))
         st.caption(
             f"Проект AequilibraE: `{report['project']}`. "
             "Его можно открыть средствами AequilibraE/QGIS."
         )
+        if report.get("transit"):
+            st.markdown(load_report_md("transit_report.md"))
     else:
         st.info("Расчёт ещё не выполнялся.")
 
@@ -156,8 +169,8 @@ elif phase == "Фаза 1 — Спрос":
         show_map(m)
 
 elif phase == "Фаза 2 — Корреспонденции":
-    st.title("Фаза 2 — Корреспонденции (старое ядро)")
-    st.caption("Для нового расчёта используйте раздел «AequilibraE». Этот раздел оставлен для сравнения результатов миграции.")
+    st.title("Фаза 2 — Корреспонденции")
+    st.caption("Новое распределение выполняется средствами AequilibraE; старый этап оставлен для сравнения.")
     rep = load_named_json("phase2/phase2_report.json") or load_named_json("phase2_report.json")
     if rep:
         c1, c2, c3 = st.columns(3)
@@ -167,8 +180,9 @@ elif phase == "Фаза 2 — Корреспонденции":
     st.markdown(load_report_md("phase2_report.md"))
 
 elif phase == "Фаза 3 — Маршруты":
-    st.title("Фаза 3 — Существующая маршрутная сеть")
-    st.caption("Маршрутная сеть сохраняется как исходная/эталонная. Её дальнейшая миграция в транспортный модуль AequilibraE требует GTFS с расписанием или частотами.")
+    st.title("Фаза 3 — Реальная маршрутная сеть")
+    st.caption("Маршруты и остановки берутся из voronezh_routes_terminals.geojson и импортируются в AequilibraE как GTFS."
+               " Расписание/интервал задаются отдельными параметрами модели, поскольку их нет в GeoJSON.")
     rep = load_named_json("phase3_real/phase3_report.json")
     if rep:
         c1, c2, c3 = st.columns(3)
@@ -176,15 +190,28 @@ elif phase == "Фаза 3 — Маршруты":
         c2.metric("Остановок охвачено", f"{rep.get('n_stops_served', 0)}")
         c3.metric("Суммарная длина", f"{rep.get('total_route_km_air', 0)} км")
     st.markdown(load_report_md("phase3_real_report.md"))
+    tr = load_named_json("aequilibrae/transit/transit_report.json")
+    if tr:
+        st.subheader("Миграция в AequilibraE Transit")
+        st.json(tr)
 
 elif phase == "Фаза 4 — Пассажиропоток":
-    st.title("Фаза 4 — Пассажиропоток (старое ядро)")
-    st.caption("Оставлено для сравнения со старым алгоритмом. Новое сетевое назначение выполняется AequilibraE.")
-    rep = load_named_json("phase4/phase4_report.json")
-    if rep:
+    st.title("Фаза 4 — Пассажиропоток")
+    st.caption("Новый пассажиропоток общественного транспорта рассчитывается AequilibraE Optimal Strategies.")
+    tr = load_named_json("aequilibrae/transit/transit_report.json")
+    if tr:
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Распределено поездок", f"{rep['assigned_trips']:,.0f}")
-        c2.metric("Макс. загрузка", f"{rep['max_segment_load']:,.0f}")
-        c3.metric("Коэфф. заполнения", f"{rep['avg_load_factor']:.2f}")
-        c4.metric("Средние пересадки", f"{rep['avg_transfers']:.2f}")
-    st.markdown(load_report_md("phase4_report.md"))
+        c1.metric("Маршрутов", f"{tr['n_routes']:,}")
+        c2.metric("Остановок", f"{tr['n_stops']:,}")
+        c3.metric("Спрос", f"{tr['total_demand']:,.0f}")
+        c4.metric("Загруженных рёбер", f"{tr['assigned_link_rows']:,}")
+        st.markdown(load_report_md("transit_report.md"))
+    else:
+        rep = load_named_json("phase4/phase4_report.json")
+        if rep:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Распределено поездок", f"{rep['assigned_trips']:,.0f}")
+            c2.metric("Макс. загрузка", f"{rep['max_segment_load']:,.0f}")
+            c3.metric("Коэфф. заполнения", f"{rep['avg_load_factor']:.2f}")
+            c4.metric("Средние пересадки", f"{rep['avg_transfers']:.2f}")
+        st.markdown(load_report_md("phase4_report.md"))
