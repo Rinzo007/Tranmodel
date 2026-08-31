@@ -12,6 +12,7 @@ from src.aequilibrae_pipeline import build_project
 from .aequilibrae_eval import AequilibraEEvaluationError, evaluate_route_set_aequilibrae
 from .candidates import generate_route_candidates
 from .corridors import extract_demand_corridors
+from .export import routes_to_geojson
 from .io import load_phase2_demand, save_route_set
 from .model import Evaluation, NetworkDesignConfig, RouteSet
 from .network import add_stop_nodes, build_tndp_graph, snap_stops_to_graph
@@ -55,12 +56,7 @@ def _empty_evaluation(demand: np.ndarray, config: NetworkDesignConfig) -> Evalua
 
 
 def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool = True) -> dict:
-    """Generate and optimize a public-transport network from the OD matrix.
-
-    Candidate construction is screened cheaply. The selected network is then
-    evaluated with AequilibraE Transit/Optimal Strategies and improved through
-    whole-route replacement, extension, shortening and removal mutations.
-    """
+    """Generate and optimize a public-transport network from the OD matrix."""
     config = config or NetworkDesignConfig()
     config.validate()
     demand, stops, graph, stop_xy_km, stop_xy_lonlat, terminal_nodes = _stop_graph_and_inputs()
@@ -80,26 +76,27 @@ def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool
     if not candidates:
         raise RuntimeError("TNDP generated no feasible route candidates")
 
-    # Screen the large candidate pool once. This avoids a full AequilibraE
-    # TransitAssignment for every weak route.
     singleton = sorted(
         ((surrogate_evaluator(demand, stop_xy_km, RouteSet([r]), config).score, r)
          for r in candidates),
         key=lambda x: x[0],
     )
-    shortlist_n = min(len(singleton), max(config.min_routes * 3,
-                                          config.candidate_limit_per_corridor * 4,
-                                          24))
+    shortlist_n = min(
+        len(singleton),
+        max(config.min_routes * 3, config.candidate_limit_per_corridor * 4, 24),
+    )
     shortlist = [r for _, r in singleton[:shortlist_n]]
 
     if full_assignment:
         project_path = build_project(force=False)
 
         def evaluator(route_set: RouteSet):
+            if not route_set.route_count():
+                return _empty_evaluation(demand, config)
             return evaluate_route_set_aequilibrae(
                 route_set, demand, stop_xy_lonlat, project_path, config,
                 cache_dir=EVAL_CACHE,
-            ) if route_set.route_count() else _empty_evaluation(demand, config)
+            )
     else:
         evaluator = lambda route_set: surrogate_evaluator(demand, stop_xy_km, route_set, config)
 
@@ -108,9 +105,11 @@ def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     route_path = save_route_set(result.routes, OUTPUT_DIR / "generated_routes.json")
+    geojson_path = routes_to_geojson(result.routes, stops, OUTPUT_DIR / "generated_routes.geojson")
     (OUTPUT_DIR / "history.json").write_text(
         json.dumps(result.history, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
     ev = result.evaluation
     report = {
         "backend": "Tranmodel TNDP solver",
@@ -128,6 +127,7 @@ def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool
         "operator_route_km": float(ev.operator_cost),
         "capacity_excess": float(ev.capacity_excess),
         "route_set": str(route_path),
+        "route_geojson": str(geojson_path),
         "evaluator": ev.metadata.get("evaluator", "unknown"),
         "full_assignment": bool(full_assignment),
     }
@@ -148,6 +148,7 @@ def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool
         f"- Пользовательская стоимость: **{report['user_cost']:.2f}**",
         f"- Суммарная длина маршрутов: **{report['operator_route_km']:.1f} км**",
         f"- Оценщик: **{report['evaluator']}**",
+        f"- Геометрия: `{report['route_geojson']}`",
         "",
         "Поиск выполняется целыми маршрутами; локальные операции: remove, extend, shorten, replace.",
     ]), encoding="utf-8")
