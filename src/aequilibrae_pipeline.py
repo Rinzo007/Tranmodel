@@ -57,8 +57,8 @@ def _parse_speed(value, highway: str | None) -> float:
 
 
 def _direction(oneway) -> int:
-    if one_way := oneway:
-        value = str(one_way).strip().lower()
+    if oneway:
+        value = str(oneway).strip().lower()
     else:
         value = ""
     if value in {"yes", "true", "1"}:
@@ -116,6 +116,7 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame) -> tuple[pd.
                 "link_id": next_link,
                 "from_node_id": a_id,
                 "to_node_id": b_id,
+                "directed": int(d != 0),
                 "direction": d,
                 "length": length_m,
                 "speed": speed,
@@ -143,9 +144,15 @@ def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame) -> tuple[pd.
 def _write_gmns_files(nodes: pd.DataFrame, links: pd.DataFrame, force: bool) -> tuple[Path, Path]:
     GMNS_DIR.mkdir(parents=True, exist_ok=True)
     node_path, link_path = GMNS_DIR / "nodes.csv", GMNS_DIR / "links.csv"
-    if force or not node_path.exists():
+    rewrite_links = force or not link_path.exists()
+    if link_path.exists():
+        existing_columns = pd.read_csv(link_path, nrows=0).columns
+        if "directed" not in existing_columns:
+            rewrite_links = True
+    rewrite_nodes = force or not node_path.exists()
+    if rewrite_nodes:
         nodes.to_csv(node_path, index=False)
-    if force or not link_path.exists():
+    if rewrite_links:
         links.to_csv(link_path, index=False)
     return link_path, node_path
 
