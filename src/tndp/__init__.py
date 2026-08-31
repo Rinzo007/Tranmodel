@@ -16,6 +16,8 @@ from .period_costs import route_period_costs
 from .cost_aggregation import aggregate_route_costs, aggregate_network_costs
 from .multiperiod_assignment import evaluate_route_set_aequilibrae_periods
 from .peak_fleet import PeriodRouteOperation, reconcile_route_periods
+from .period_vehicle_plan import build_route_vehicle_plan, build_network_vehicle_plan
+from .period_network_plan import reconcile_period_network
 
 __all__ = [
     "NetworkDesignConfig", "Route", "RouteSet", "Evaluation", "DemandCorridor",
@@ -29,4 +31,5 @@ __all__ = [
     "PeriodDemand", "PeriodAssignment", "build_period_demands", "aggregate_period_assignments",
     "route_period_costs", "aggregate_route_costs", "aggregate_network_costs",
     "evaluate_route_set_aequilibrae_periods", "PeriodRouteOperation", "reconcile_route_periods",
+    "build_route_vehicle_plan", "build_network_vehicle_plan", "reconcile_period_network",
 ]
