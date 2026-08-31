@@ -78,7 +78,7 @@ def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool
     if not candidates:
         raise RuntimeError("TNDP generated no feasible route candidates")
 
-    screened = sorted(((surrogate_evaluator(demand, zone_xy, RouteSet([r]), config, zone_to_stop).score, r)
+    screened = sorted(((surrogate_evaluator(demand, zone_xy, RouteSet([r]), config, zone_to_stop, stop_xy).score, r)
                        for r in candidates), key=lambda x: x[0])
     shortlist = [r for _, r in screened[:min(len(screened), max(config.min_routes * 3, 24))]]
 
@@ -87,13 +87,12 @@ def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool
         evaluator = lambda route_set: (_empty_evaluation(demand, config) if not route_set.route_count() else
             evaluate_route_set_aequilibrae(route_set, demand, stop_lonlat_xy, project_path, config, cache_dir=EVAL_CACHE))
     else:
-        evaluator = lambda route_set: surrogate_evaluator(demand, zone_xy, route_set, config, zone_to_stop)
+        evaluator = lambda route_set: surrogate_evaluator(demand, zone_xy, route_set, config, zone_to_stop, stop_xy)
 
     result = TNDPOptimizer(shortlist, evaluator, config).solve(graph=stop_graph)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     route_path = save_route_set(result.routes, OUTPUT_DIR / "generated_routes.json")
-    geojson_path = routes_to_geojson(result.routes, stops, OUTPUT_DIR / "generated_routes.geojson",
-                                     road_graph=road_graph, stop_to_road_node=stop_mapping)
+    geojson_path = routes_to_geojson(result.routes, stops, OUTPUT_DIR / "generated_routes.geojson", road_graph=road_graph, stop_to_road_node=stop_mapping)
     (OUTPUT_DIR / "history.json").write_text(json.dumps(result.history, ensure_ascii=False, indent=2), encoding="utf-8")
 
     ev = result.evaluation
@@ -121,7 +120,7 @@ def run_tndp(config: NetworkDesignConfig | None = None, *, full_assignment: bool
         f"- Итоговых маршрутов: **{report['n_routes']:,}**",
         f"- Доля обслуженного спроса: **{report['direct_demand_share'] * 100:.1f}%**",
         f"- Средние пересадки: **{report['transfers']:.2f}**",
-        f"- Пользовательская стоимость: **{report['user_cost']:.2f}",
+        f"- Пользовательская стоимость: **{report['user_cost']:.2f}**",
         f"- Суммарная длина: **{report['operator_route_km']:.1f} км**",
         f"- Оценщик: **{report['evaluator']}**", "",
         "OD задаётся между полигонами транспортных зон. Маршруты привязаны к реальным остановкам и экспортируются вдоль дорожного графа.",
