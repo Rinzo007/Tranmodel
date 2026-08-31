@@ -14,8 +14,9 @@ import numpy as np
 from config import PROJ_EPSG
 from .gtfs import build_gtfs_from_route_set
 from .model import Evaluation, NetworkDesignConfig, RouteSet
+from .route_economics import calculate_route_characteristics
 
-EVALUATOR_VERSION = "aeq-transit-v6-cached-paths"
+EVALUATOR_VERSION = "aeq-transit-v7-route-economics"
 
 
 class AequilibraEEvaluationError(RuntimeError):
@@ -24,6 +25,10 @@ class AequilibraEEvaluationError(RuntimeError):
 
 def _route_frequency(route: Any) -> float:
     return float(getattr(route, "frequency_vph", getattr(route, "frequency", 6.0)))
+
+
+def _route_flow(route: Any) -> float:
+    return max(float(getattr(route, "max_section_flow_pph", 0.0)), 0.0)
 
 
 def _route_length_km(route: Any, road_graph: nx.Graph, stop_mapping, path_index=None) -> float:
@@ -41,7 +46,9 @@ def _route_length_km(route: Any, road_graph: nx.Graph, stop_mapping, path_index=
 
 def _route_set_key(route_set: RouteSet) -> str:
     payload = {"version": EVALUATOR_VERSION, "routes": [
-        {"nodes": list(route.nodes), "frequency_vph": _route_frequency(route)}
+        {"nodes": list(route.nodes), "frequency_vph": _route_frequency(route),
+         "max_section_flow_pph": _route_flow(route),
+         "vehicle_type": getattr(route, "vehicle_type", "bus")}
         for route in route_set.routes
     ]}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -135,11 +142,63 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand: np.ndarray, stop
         transfer_arr = np.nan_to_num(np.asarray(skim.get("transfers", np.zeros_like(demand))), nan=0.0)
         avg_transfers = float(np.nansum(demand * transfer_arr) / max(total, 1.0))
         direct_share = float(demand[(finite) & (transfer_arr == 0)].sum() / max(total, 1.0))
-        operator_km = sum(_route_length_km(route, road_graph, stop_mapping, path_index) * _route_frequency(route) for route in route_set.routes)
-        score = weighted_user_cost + operator_km * config.operator_route_km_weight + uncovered * config.uncovered_demand_weight + avg_transfers * config.transfer_penalty_min * config.transfer_weight
-        evaluation = Evaluation(score=float(score), user_cost=weighted_user_cost, operator_cost=float(operator_km), uncovered_demand=uncovered,
-                                transfers=avg_transfers, direct_demand_share=direct_share,
-                                metadata={"evaluator": "AequilibraE", "served_demand": served})
+
+        route_characteristics = []
+        annual_mileage = 0.0
+        annual_hours = 0.0
+        fleet = 0
+        for route in route_set.routes:
+            one_way_km = _route_length_km(route, road_graph, stop_mapping, path_index)
+            operating = calculate_route_characteristics(
+                2.0 * one_way_km,
+                _route_flow(route),
+                capacity_at_4_ppm2=config.capacity_at_4_ppm2,
+                speed_kmh=config.speed_kmh,
+                interval_reserve_sec=config.interval_reserve_sec,
+                terminal_delay_reserve=config.terminal_delay_reserve,
+                charging_min_per_terminal=config.charging_min_per_terminal,
+                technical_readiness=(config.electric_technical_readiness if getattr(route, "vehicle_type", "bus") == "electric_transit" else config.bus_technical_readiness),
+                frequency_profile=config.frequency_profile,
+            )
+            annual_mileage += operating.annual_mileage_km
+            annual_hours += operating.annual_in_service_hours
+            fleet += operating.fleet
+            route_characteristics.append({
+                "route_id": route.route_id,
+                "one_way_length_km": one_way_km,
+                "round_trip_length_km": operating.route_length_km,
+                "max_section_flow_pph": operating.max_section_flow_pph,
+                "speed_kmh": operating.speed_kmh,
+                "frequency_vph": operating.frequency_vph,
+                "interval_min": operating.interval_min,
+                "turnaround_min": operating.turnaround_min,
+                "release": operating.release,
+                "technical_readiness": operating.technical_readiness,
+                "fleet": operating.fleet,
+                "daily_trips": operating.daily_trips,
+                "annual_mileage_km": operating.annual_mileage_km,
+                "annual_in_service_hours": operating.annual_in_service_hours,
+                "vehicle_type": getattr(route, "vehicle_type", "bus"),
+            })
+
+        # No monetary cost per km was supplied, so annual mileage is retained as
+        # the operator-resource indicator rather than converted into money.
+        score = (weighted_user_cost
+                 + annual_mileage * config.operator_route_km_weight
+                 + uncovered * config.uncovered_demand_weight
+                 + avg_transfers * config.transfer_penalty_min * config.transfer_weight)
+        evaluation = Evaluation(
+            score=float(score), user_cost=weighted_user_cost, operator_cost=float(annual_mileage),
+            uncovered_demand=uncovered, transfers=avg_transfers, direct_demand_share=direct_share,
+            metadata={
+                "evaluator": "AequilibraE",
+                "served_demand": served,
+                "annual_mileage_km": annual_mileage,
+                "annual_in_service_hours": annual_hours,
+                "fleet": fleet,
+                "route_characteristics": route_characteristics,
+            },
+        )
         result_path.write_text(_evaluation_json(evaluation), encoding="utf-8")
         return evaluation
     finally:
