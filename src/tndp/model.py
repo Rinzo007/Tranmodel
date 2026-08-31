@@ -52,7 +52,6 @@ class RouteSet:
         return len(self.routes)
 
     def contains_nodes(self, nodes: Iterable[int]) -> bool:
-        """Check exact directed stop sequence; reverse direction is distinct."""
         target = tuple(int(n) for n in nodes)
         return any(r.nodes == target for r in self.routes)
 
@@ -110,6 +109,10 @@ class NetworkDesignConfig:
     local_search_rounds: int = 4
     mutations_per_route: int = 12
     full_evaluation: bool = True
+    # Number of fast-scored additions/mutations that receive the expensive
+    # AequilibraE evaluation. Keeping this >1 avoids committing to a route
+    # solely because the surrogate happened to rank it first.
+    full_candidates_per_iteration: int = 3
 
     def validate(self) -> None:
         if self.min_routes < 0 or self.max_routes < self.min_routes:
@@ -124,3 +127,5 @@ class NetworkDesignConfig:
             raise ValueError("target_load_factor must be in (0, 1]")
         if self.vehicle_capacity <= 0:
             raise ValueError("vehicle_capacity must be positive")
+        if self.full_candidates_per_iteration < 1:
+            raise ValueError("full_candidates_per_iteration must be positive")
