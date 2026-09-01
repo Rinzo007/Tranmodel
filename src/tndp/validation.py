@@ -46,13 +46,13 @@ def validate_route_plan(plan: dict, periods_count: int = 6) -> ValidationReport:
 def validate_network_plan(plan: dict) -> ValidationReport:
     issues = []
     routes = plan.get("routes") or []
-    network = plan.get("network") or {}
+    network = plan.get("network") or plan
     expected_fleet = sum(int(r.get("peak_fleet", 0)) for r in routes)
     actual_fleet = int(network.get("fleet", 0))
     if expected_fleet != actual_fleet:
         issues.append(ValidationIssue("error", "network_fleet", "Парк сети не соответствует сумме маршрутных пиков", actual_fleet))
     expected_total = sum(float((r.get("costs") or {}).get("total_annual_mln", 0.0)) for r in routes)
-    actual_total = float(network.get("total_annual_mln", 0.0))
+    actual_total = float((network.get("costs") or {}).get("total_annual_mln", network.get("total_annual_mln", 0.0)))
     if not isclose(expected_total, actual_total, rel_tol=1e-8, abs_tol=1e-8):
         issues.append(ValidationIssue("error", "network_cost", "Стоимость сети не соответствует сумме маршрутных стоимостей", actual_total))
     return ValidationReport(not any(i.level == "error" for i in issues), tuple(issues))

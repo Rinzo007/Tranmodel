@@ -17,9 +17,18 @@ AEQ_DIR = CACHE_DIR / "aequilibrae"
 GMNS_DIR = AEQ_DIR / "gmns"
 PROJECT_DIR = AEQ_DIR / "project"
 TRANSIT_PROJECT_DIR = AEQ_DIR / "transit_project"
-BUILD_VERSION = "tranmodel-aeq-v7-transit-support-compact"
+BUILD_VERSION = "tranmodel-aeq-v8-transit-road-classes"
 VERSION_FILE = TRANSIT_PROJECT_DIR / "tranmodel_build_version.txt"
 TRANSIT_SUPPORT_RADIUS_M = 900.0
+# Only carriageway-class roads enter the transit support network. OSM service
+# roads, footways, tracks and cycleways are dropped: they rarely carry bus
+# corridors and dominate the feature count, making the AequilibraE project
+# build and every transit assignment several times slower.
+TRANSIT_ROAD_CLASSES = {
+    "motorway", "motorway_link", "trunk", "trunk_link", "primary", "primary_link",
+    "secondary", "secondary_link", "tertiary", "tertiary_link",
+    "unclassified", "residential", "living_street", "road",
+}
 
 DEFAULT_SPEED_KMH = {
     "motorway": 90.0, "motorway_link": 50.0, "trunk": 70.0, "trunk_link": 40.0,
@@ -75,7 +84,9 @@ def _filter_transit_support_roads(roads: gpd.GeoDataFrame, stops: gpd.GeoDataFra
     anchors.extend(list(zones.to_crs(PROJ_EPSG).geometry.centroid))
     support_area = gpd.GeoSeries(anchors, crs=PROJ_EPSG).buffer(TRANSIT_SUPPORT_RADIUS_M).union_all()
     mask = roads_metric.geometry.intersects(support_area)
-    return roads.loc[mask].copy()
+    roads = roads.loc[mask].copy()
+    roads = roads.loc[roads["highway"].astype(str).str.lower().isin(TRANSIT_ROAD_CLASSES)].copy()
+    return roads
 
 
 def roads_to_gmns(roads: gpd.GeoDataFrame, zones: gpd.GeoDataFrame, progress=None) -> tuple[pd.DataFrame, pd.DataFrame]:

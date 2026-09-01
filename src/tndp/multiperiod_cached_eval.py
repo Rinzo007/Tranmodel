@@ -4,6 +4,7 @@ from pathlib import Path
 from dataclasses import asdict
 
 from .aequilibrae_eval_cache import load_json, save_json, stable_route_set_key
+from .aequilibrae_eval import EVALUATOR_VERSION
 from .multiperiod_assignment import evaluate_route_set_aequilibrae_periods
 from .model import Evaluation
 
@@ -19,7 +20,7 @@ def evaluate_route_set_aequilibrae_periods_cached(route_set, base_demand, stop_x
         return evaluate_route_set_aequilibrae_periods(route_set, base_demand, stop_xy_lonlat, project_path, config,
             road_graph=road_graph, stop_mapping=stop_mapping, path_index=path_index, stop_to_zone=stop_to_zone,
             cache_dir=None, demand_factors=demand_factors, progress=progress)
-    extra = {"kind": "six_period_evaluation", "project_path": str(project_path), "demand_factors": demand_factors or {}}
+    extra = {"kind": "six_period_evaluation", "project_path": str(project_path), "demand_factors": demand_factors or {}, "evaluator_version": EVALUATOR_VERSION}
     key = stable_route_set_key(route_set, config, extra=extra)
     root = Path(cache_dir) / "six_period"
     cached = load_json(root, key)

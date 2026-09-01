@@ -42,7 +42,7 @@ def build_stop_path_index(graph: nx.Graph, stop_mapping, stop_pairs, cache_file:
     times: dict[tuple[int, int], float] = {}
     lengths: dict[tuple[int, int], float] = {}
     for a, b in pairs:
-        src, dst = int(stop_mapping[a]), int(stop_mapping[b])
+        src, dst = stop_mapping[a], stop_mapping[b]
         try:
             p = tuple(nx.shortest_path(graph, src, dst, weight="time"))
         except nx.NetworkXNoPath:

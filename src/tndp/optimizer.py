@@ -96,10 +96,10 @@ class TNDPOptimizer:
     def _screen_and_exact(self, trials, current):
         unique = {}
         for trial, meta in trials: unique.setdefault(self._key(trial), (trial, meta))
-        ranked = sorted((self._evaluate(t, full=False).score, t, m) for t, m in unique.values())
+        ranked = sorted(((self._evaluate(t, full=False).score, i, t, m) for i, (t, m) in enumerate(unique.values())))
         top_k = min(self.config.full_candidates_per_iteration, len(ranked))
         best_network, best_eval, best_meta = None, current, None
-        for rank, (_, trial, meta) in enumerate(ranked[:top_k], 1):
+        for rank, (_, _, trial, meta) in enumerate(ranked[:top_k], 1):
             self._notify(f"  точная оценка соседа {rank}/{top_k}")
             ev = self._evaluate(trial, full=True)
             if ev.score + self.config.improvement_epsilon < best_eval.score:

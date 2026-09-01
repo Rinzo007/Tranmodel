@@ -9,14 +9,15 @@ from scipy.spatial import cKDTree
 from config import CACHE_DIR, LAYERS_DIR, PROJ_EPSG
 from src.aequilibrae_pipeline import build_project
 from src.zone_od import run_zone_od
+from src.transit_project_builder import build_thin_transit_project
 from .aequilibrae_eval import evaluate_route_set_aequilibrae
 from .multiperiod_cached_eval import evaluate_route_set_aequilibrae_periods_cached
-from .generate_route_candidates import generate_route_candidates
+from .candidates import generate_route_candidates
 from .corridors import DemandCorridor, extract_demand_corridors
 from .coverage import population_coverage
 from .export import routes_to_geojson
 from .io import save_route_set
-from .interval_profile import DEFAULT_INTERVAL_PROFILE, as_frequency_profile, validate_interval_profile
+from .interval_profile import DEFAULT_INTERVAL_PROFILE, as_frequency_profile, validate_profile
 from .model import Evaluation, NetworkDesignConfig, RouteSet
 from .network import add_stop_nodes, build_tndp_graph, snap_stops_to_graph
 from .optimizer import TNDPOptimizer
@@ -74,8 +75,7 @@ def _with_coverage(evaluation, route_set, zone_xy, zones, stop_xy):
 
 def run_tndp(config=None, *, full_assignment=True, progress=None):
     config=_normalize_config(config or NetworkDesignConfig()); notify=progress or (lambda msg: print(f"[TNDP] {msg}", flush=True))
-    profile_check = validate_interval_profile(DEFAULT_INTERVAL_PROFILE).as_dict(); notify(f"Профиль интервалов: {'OK' if profile_check['passed'] else 'ОШИБКА'}")
-    if not profile_check["passed"]: raise ValueError(profile_check)
+    validate_profile(DEFAULT_INTERVAL_PROFILE); notify("Профиль интервалов: OK")
     if not (CACHE_DIR/"zone_od"/"od_matrix.parquet").exists(): notify("Подготавливаем матрицу корреспонденций..."); run_zone_od(zone_size_m=750.0, force=False)
     notify("Загружаем зоны, остановки и реальный дорожный граф...")
     demand,zones,stops,road_graph,stop_graph,stop_mapping,stop_xy,zone_xy,zone_to_stop,stop_to_zone,stop_demand,stop_lonlat_xy,terminal_nodes=_load_inputs()
@@ -87,7 +87,7 @@ def run_tndp(config=None, *, full_assignment=True, progress=None):
     stop_pairs={(a,b) for route in candidates for a,b in zip(route.nodes[:-1],route.nodes[1:])}; path_index=build_stop_path_index(road_graph,stop_mapping,stop_pairs,PATH_CACHE); notify(f"Кэш путей остановка→остановка: {len(path_index.paths):,} сегментов")
     screened=sorted(((surrogate_evaluator(demand,zone_xy,RouteSet([r]),config,zone_to_stop,stop_xy).score,r) for r in candidates),key=lambda x:x[0]); shortlist=[r for _,r in screened[:min(len(screened),max(config.min_routes*3,24))]]; notify(f"Быстрый отбор завершён: {len(shortlist)} кандидатов перед TNDP")
     if full_assignment:
-        notify("Подготавливаем минимальный Transit-проект AequilibraE..."); project_path=build_project(force=False,progress=notify,mode="transit"); notify("Transit-проект AequilibraE готов. Запускаем многопериодную оценку маршрутной сети...")
+        notify("Подготавливаем Transit-проект AequilibraE (thin)..."); project_path=build_thin_transit_project(road_graph=road_graph, stop_mapping=stop_mapping, zone_centroids_xy=zone_xy, stop_to_zone=stop_to_zone, output_dir=CACHE_DIR/"aequilibrae"/"thin_transit_project"); notify("Transit-проект AequilibraE готов. Запускаем многопериодную оценку маршрутной сети...")
         def evaluator(route_set):
             if not route_set.route_count(): return _empty_evaluation(demand,config)
             ev=evaluate_route_set_aequilibrae_periods_cached(route_set,demand,stop_lonlat_xy,project_path,config,road_graph=road_graph,stop_mapping=stop_mapping,path_index=path_index,stop_to_zone=stop_to_zone,cache_dir=EVAL_CACHE,progress=notify)

@@ -22,7 +22,7 @@ from .route_loads import reconstruct_route_loads, select_vehicle_for_route
 from .transit_loads import extract_transit_segment_loads
 from .vehicle_types import get_vehicle_type
 
-EVALUATOR_VERSION = "aeq-transit-v14-full-operating-cost"
+EVALUATOR_VERSION = "aeq-transit-v15-uncovered-is-boardings"
 MAX_ASSIGNMENT_FLEET_ITERATIONS = 3
 
 class AequilibraEEvaluationError(RuntimeError):
@@ -104,8 +104,12 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand: np.ndarray, stop
         project = Project.from_path(project_dir); transit = Transit(project)
         builder = transit.new_gtfs_builder(agency="TRANMODEL", file_path=str(gtfs), day="", description="TNDP candidate route set")
         builder.set_allow_map_match(False); builder.load_date("2026-01-15"); builder.execute_import()
-        graph_builder = transit.create_graph(projected_crs=f"EPSG:{PROJ_EPSG}", with_inner_stop_transfers=True, with_outer_stop_transfers=False, with_walking_edges=True, distance_upper_bound=800.0, blocking_centroid_flows=True, connector_method="nearest_neighbour", max_connectors_per_zone=3)
-        graph_builder.create_line_geometry(method="connector project match", graph="c"); graph_builder.save(); graph = graph_builder.to_transit_graph()
+        graph_builder = transit.create_graph(projected_crs=f"EPSG:{PROJ_EPSG}", with_inner_stop_transfers=True, with_outer_stop_transfers=False, with_walking_edges=True, distance_upper_bound=800.0, blocking_centroid_flows=True, connector_method="nearest_neighbour", max_connectors_per_zone=0)
+        # NOTE: create_line_geometry assumes node_id == row index + 1 (contiguous ids). Our thin
+        # project uses large taz_ids (kept from the road graph), so that positional lookup fails
+        # with KeyError. Geometry is only used for persisted line output, which the in-memory
+        # assignment and load extraction do not require, so we skip geometry creation and save.
+        graph = graph_builder.to_transit_graph()
         centroids = np.asarray(graph.centroids, dtype=np.int64)
         if len(centroids) != demand.shape[0]: raise AequilibraEEvaluationError(f"Transit graph has {len(centroids)} zone centroids but demand has {demand.shape[0]} zones")
         matrix = AequilibraeMatrix(); matrix.create_empty(zones=len(centroids), matrix_names=["pt"], memory_only=True); matrix.index = centroids; matrix.matrices[:, :, 0] = demand; matrix.computational_view(["pt"])
@@ -115,9 +119,14 @@ def evaluate_route_set_aequilibrae(route_set: RouteSet, demand: np.ndarray, stop
         def field_array(name: str, default: float = 0.0):
             try: return np.asarray(skim[name], dtype=float)
             except Exception: return np.full_like(demand, default, dtype=float)
+        boardings = np.nan_to_num(field_array("boardings", 0.0), nan=0.0)
         ride = np.nan_to_num(field_array("on_board_trav_time", np.inf), nan=np.inf, posinf=np.inf); wait = np.nan_to_num(field_array("waiting_time", np.inf), nan=np.inf, posinf=np.inf); walk = np.nan_to_num(field_array("walking_trav_time", np.inf), nan=np.inf, posinf=np.inf); transfers_arr = np.nan_to_num(field_array("transfers", 0.0), nan=0.0)
+        # AequilibraE's OS algorithm returns 0.0 (not inf) in the skim fields for
+        # OD pairs with no feasible path, so finiteness cannot detect uncovered demand.
+        # A pair is served only if a transit journey was boarded or a walk path exists.
+        served_mask = (boardings >= 1) | (walk > 0)
         generalized = config.in_vehicle_weight * ride + config.wait_weight * wait + config.walk_weight * walk + config.transfer_weight * transfers_arr * config.transfer_penalty_min
-        finite = np.isfinite(generalized); served = float(demand[finite].sum()); uncovered = float(demand[~finite].sum()); weighted_user_cost = float(np.nansum(demand[finite] * generalized[finite]) / max(served, 1.0)); avg_transfers = float(np.nansum(demand * transfers_arr) / max(total, 1.0)); direct_share = float(demand[(finite) & (transfers_arr == 0)].sum() / max(total, 1.0))
+        served = float(demand[served_mask].sum()); uncovered = float(total - served); weighted_user_cost = float(np.nansum(demand[served_mask] * generalized[served_mask]) / max(served, 1.0)); avg_transfers = float(np.nansum(demand[served_mask] * transfers_arr[served_mask]) / max(served, 1.0)); direct_share = float(demand[served_mask & (transfers_arr == 0)].sum() / max(total, 1.0))
         exact_loads = extract_transit_segment_loads(project_dir, transit_class.results); exact_max = exact_loads["max_sections"]
         final_routes, final_details = [], []
         for i, route in enumerate(adapted.routes):

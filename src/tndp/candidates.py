@@ -9,7 +9,7 @@ import numpy as np
 
 from .corridors import DemandCorridor
 from .model import NetworkDesignConfig, Route
-from .route_economics import choose_vehicle_type
+from .route_loads import select_vehicle_for_route
 
 
 def _shortest_path(graph: nx.Graph, origin: int, destination: int) -> tuple[list[int], float]:
@@ -107,18 +107,19 @@ def generate_route_candidates(corridors: list[DemandCorridor], graph: nx.Graph, 
                 continue
             signatures.add(sig)
 
-            chars = choose_vehicle_type(
-                2.0 * vlen,
-                corridor.demand,
-                config.allowed_vehicle_types,
+            code, details = select_vehicle_for_route(
+                max_section_flow_pph=corridor.demand,
+                route_length_km=2.0 * vlen,
+                allowed_vehicle_types=config.allowed_vehicle_types,
                 speed_kmh=config.speed_kmh,
                 frequency_profile=config.frequency_profile,
             )
+            frequency_vph = float(details.get("frequency_vph") or 60.0 / details["interval_min"])
             routes.append(Route(
                 nodes=sig,
                 route_id=f"cand_{len(routes)+1:05d}",
-                frequency_vph=chars.frequency_vph,
+                frequency_vph=frequency_vph,
                 max_section_flow_pph=float(corridor.demand),
-                vehicle_type=chars.vehicle_type,
+                vehicle_type=code,
             ))
     return routes
