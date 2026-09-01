@@ -1,3 +1,5 @@
+import pytest
+
 import numpy as np
 
 from src.tndp.interval_profile import DEFAULT_INTERVAL_PROFILE, daily_frequency_factor
@@ -13,7 +15,7 @@ def test_interval_profile_has_six_periods_and_14_5_factor():
 def test_period_route_set_preserves_route_metadata():
     route = Route((1, 2, 3), "R1", 6.0, 420.0, "liaz")
     scaled = _period_route_set(RouteSet([route]), 0.8).routes[0]
-    assert scaled.frequency_vph == 4.8
+    assert scaled.frequency_vph == pytest.approx(4.8)
     assert scaled.max_section_flow_pph == 420.0
     assert scaled.vehicle_type == "liaz"
     assert scaled.route_id == "R1"
