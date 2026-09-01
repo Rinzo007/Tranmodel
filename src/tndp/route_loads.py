@@ -50,16 +50,51 @@ def reconstruct_route_loads(route_set: RouteSet, demand: np.ndarray, *, stop_to_
 
 
 def select_vehicle_for_route(*, max_section_flow_pph: float, route_length_km: float, allowed_vehicle_types: Sequence[str], speed_kmh: float=18.0, interval_reserve_sec: float=20.0, terminal_delay_reserve: float=.08, charging_min_per_terminal: float=10.0, annual_days: int=350, park_trip_coefficient: float=.90, frequency_profile=None) -> tuple[str, dict]:
-    """Select the vehicle with the lowest complete annual cost for the assigned peak flow."""
+    """Select the cheapest vehicle that can carry the peak section flow.
+
+    Capacity feasibility is evaluated before economic ranking.  This prevents
+    the TNDP optimizer from choosing a cheaper but overloaded vehicle.  The
+    selected vehicle also determines the service frequency through the
+    canonical route-operation calculation.
+    """
     profile = frequency_profile or tuple((p.hours,p.frequency_factor) for p in DEFAULT_INTERVAL_PROFILE)
     candidates=[]
     for code in allowed_vehicle_types:
         if code not in VEHICLE_TYPES: continue
-        details=calculate_route_operations(route_length_km=route_length_km,max_section_flow_pph=max_section_flow_pph,vehicle_type=code,speed_kmh=speed_kmh,interval_reserve_sec=interval_reserve_sec,terminal_delay_reserve=terminal_delay_reserve,charging_min_per_terminal=charging_min_per_terminal,annual_days=annual_days,park_trip_coefficient=park_trip_coefficient,frequency_profile=profile)
-        op_cost=aggregate_route_costs(vehicle_type=code,annual_km=details["annual_mileage_km"],fleet=int(details["fleet"]),annual_hours=details["annual_in_service_hours"],annual_contract_mln=details.get("annual_fleet_contract_cost_mln",0.0),annual_amortization_mln=details.get("annual_fleet_amortization_mln",0.0))
+        vehicle = VEHICLE_TYPES[code]
+        if vehicle.capacity + 1e-9 < max_section_flow_pph:
+            continue
+        details=calculate_route_operations(
+            route_length_km=route_length_km,
+            max_section_flow_pph=max_section_flow_pph,
+            vehicle_type=code,
+            speed_kmh=speed_kmh,
+            interval_reserve_sec=interval_reserve_sec,
+            terminal_delay_reserve=terminal_delay_reserve,
+            charging_min_per_terminal=charging_min_per_terminal,
+            annual_days=annual_days,
+            park_trip_coefficient=park_trip_coefficient,
+            frequency_profile=profile,
+        )
+        op_cost=aggregate_route_costs(
+            vehicle_type=code,
+            annual_km=details["annual_mileage_km"],
+            fleet=int(details["fleet"]),
+            annual_hours=details["annual_in_service_hours"],
+            annual_contract_mln=details.get("annual_fleet_contract_cost_mln",0.0),
+            annual_amortization_mln=details.get("annual_fleet_amortization_mln",0.0),
+        )
         annual_cost=float(op_cost["total_annual_mln"])
         enriched=dict(details)
-        enriched.update({"annual_total_operating_cost_mln":annual_cost, "economic_breakdown":op_cost})
+        enriched.update({"capacity_ok": True, "annual_total_operating_cost_mln":annual_cost, "economic_breakdown":op_cost})
         candidates.append((annual_cost,float(details["interval_min"]),code,enriched))
-    if not candidates: raise ValueError("No vehicle types available")
+    if not candidates:
+        # Keep the largest vehicle as an explicit overload result.  The caller
+        # can reject it through capacity_ok=False instead of silently failing.
+        eligible=[code for code in allowed_vehicle_types if code in VEHICLE_TYPES]
+        if not eligible: raise ValueError("No vehicle types available")
+        code=max(eligible,key=lambda c: VEHICLE_TYPES[c].capacity)
+        details=calculate_route_operations(route_length_km=route_length_km,max_section_flow_pph=max_section_flow_pph,vehicle_type=code,speed_kmh=speed_kmh,interval_reserve_sec=interval_reserve_sec,terminal_delay_reserve=terminal_delay_reserve,charging_min_per_terminal=charging_min_per_terminal,annual_days=annual_days,park_trip_coefficient=park_trip_coefficient,frequency_profile=profile)
+        details=dict(details); details["capacity_ok"]=False; details["capacity_warning"]="No available vehicle has sufficient capacity"
+        return code, details
     _,_,code,details=min(candidates,key=lambda x:(x[0],x[1])); return code,details
