@@ -4,14 +4,14 @@ from .operating_costs import annual_route_costs
 
 
 def aggregate_route_costs(*, vehicle_type: str, annual_km: float, fleet: int,
-                          annual_hours: float, annual_contract_mln: float = 0.0,
+                          annual_hours: float, route_length_km: float,
+                          annual_contract_mln: float = 0.0,
                           annual_amortization_mln: float = 0.0) -> dict[str, float]:
-    base = annual_route_costs(vehicle_type, annual_km, fleet, annual_hours)
+    base = annual_route_costs(vehicle_type, annual_km, fleet, annual_hours, route_length_km)
     total = base["total_before_vehicle"] + float(annual_contract_mln) + float(annual_amortization_mln)
     return {**base, "fleet": int(fleet), "annual_km": float(annual_km), "annual_hours": float(annual_hours),
             "contract_mln": float(annual_contract_mln), "amortization_mln": float(annual_amortization_mln),
-            "total_annual_mln": total,
-            "cost_per_km_rub": total * 1_000_000 / max(float(annual_km), 1e-9)}
+            "total_annual_mln": total, "cost_per_km_rub": total * 1_000_000 / max(float(annual_km), 1e-9)}
 
 
 def aggregate_network_costs(route_costs: list[dict]) -> dict[str, float]:
@@ -34,8 +34,11 @@ def annualize_period_route_costs(period_route_costs: list[dict], *, peak_fleet: 
     annual_hours = sum(float(x.get("annual_hours", x.get("annual_in_service_hours", 0.0))) for x in period_route_costs)
     if not period_route_costs:
         return {"fleet": int(peak_fleet), "annual_km": 0.0, "annual_hours": 0.0, "total_annual_mln": 0.0}
-    vehicle_type = str(period_route_costs[0].get("vehicle_type", ""))
-    return aggregate_route_costs(vehicle_type=vehicle_type, annual_km=annual_km, fleet=peak_fleet,
-                                 annual_hours=annual_hours,
-                                 annual_contract_mln=float(period_route_costs[0].get("annual_contract_mln", 0.0)),
-                                 annual_amortization_mln=float(period_route_costs[0].get("amortization_mln", 0.0)))
+    first = period_route_costs[0]
+    return aggregate_route_costs(
+        vehicle_type=str(first.get("vehicle_type", "")), annual_km=annual_km,
+        fleet=peak_fleet, annual_hours=annual_hours,
+        route_length_km=float(first.get("route_length_km", 0.0)),
+        annual_contract_mln=float(first.get("annual_contract_mln", 0.0)),
+        annual_amortization_mln=float(first.get("amortization_mln", 0.0)),
+    )
