@@ -49,7 +49,7 @@ def evaluate_route_set_aequilibrae_periods(
 ) -> Evaluation:
     """Evaluate a route set in six periods and build one unified annual operating plan.
 
-    The interval profile controls service frequency only.  A separate
+    The interval profile controls service frequency only. A separate
     ``demand_factors`` mapping may optionally model a temporal demand profile;
     when it is absent, demand is identical in all periods.
     """
@@ -66,8 +66,6 @@ def evaluate_route_set_aequilibrae_periods(
         raw_factor = None
         if demand_factors:
             raw_factor = demand_factors.get(key, demand_factors.get(str(p.number), demand_factors.get(p.name)))
-        # Frequency profile and demand profile are deliberately independent.
-        # Without an explicit demand profile, keep the OD matrix unchanged.
         demand_factor = float(1.0 if raw_factor is None else raw_factor)
         if demand_factor < 0:
             raise ValueError(f"Negative demand factor for period {key}")
@@ -78,6 +76,12 @@ def evaluate_route_set_aequilibrae_periods(
             f"спрос ×{demand_factor:.2f}, частота ×{p.frequency_factor:.2f}"
         )
         period_cache = Path(cache_dir) / "periods" / key if cache_dir else None
+        # The period frequency factor has already been applied to ``period_routes``.
+        # Pass a neutral one-period GTFS profile so the factor is not applied twice,
+        # and so AequilibraE receives only the timetable for the period being evaluated.
+        gtfs_period = (
+            IntervalPeriod(p.number, p.name, p.start, p.end, 1.0, p.hours),
+        )
         ev = evaluate_route_set_aequilibrae(
             period_routes,
             period_demand,
@@ -90,9 +94,8 @@ def evaluate_route_set_aequilibrae_periods(
             stop_to_zone=stop_to_zone,
             cache_dir=period_cache,
             assignment_iteration=0,
+            service_profile=gtfs_period,
         )
-        # Annual service weighting is based on the explicit demand profile when
-        # supplied. The frequency profile itself is not used to scale demand.
         weight = p.hours * demand_factor
         total_weight += weight
         weighted["user_cost"] += ev.user_cost * weight
@@ -132,7 +135,6 @@ def evaluate_route_set_aequilibrae_periods(
         )
 
     norm = total_weight or 1.0
-
     route_specs = []
     for ri, route in enumerate(route_set.routes):
         length = 0.0
@@ -142,17 +144,14 @@ def evaluate_route_set_aequilibrae_periods(
                 length = float(chars[ri]["one_way_length_km"])
                 break
         if length > 0:
-            route_specs.append(
-                {
-                    "route_id": route.route_id or ri + 1,
-                    "route_length_km": length,
-                    "period_peak_flows": route_period_flows[ri],
-                    "vehicle_type": route.vehicle_type,
-                    "auto_vehicle": True,
-                    "allowed_vehicle_types": config.allowed_vehicle_types,
-                }
-            )
-
+            route_specs.append({
+                "route_id": route.route_id or ri + 1,
+                "route_length_km": length,
+                "period_peak_flows": route_period_flows[ri],
+                "vehicle_type": route.vehicle_type,
+                "auto_vehicle": True,
+                "allowed_vehicle_types": config.allowed_vehicle_types,
+            })
     network_plan = (
         build_network_vehicle_plan(
             route_specs,
@@ -181,14 +180,7 @@ def evaluate_route_set_aequilibrae_periods(
             "uncovered_demand_hours": total_uncovered,
         },
         "period_frequency_profile": [
-            {
-                "period_id": _period_key(p),
-                "name": p.name,
-                "start": p.start,
-                "end": p.end,
-                "factor": p.frequency_factor,
-                "hours": p.hours,
-            }
+            {"period_id": _period_key(p), "name": p.name, "start": p.start, "end": p.end, "factor": p.frequency_factor, "hours": p.hours}
             for p in DEFAULT_INTERVAL_PROFILE
         ],
         "unified_operating_plan": network_plan,
