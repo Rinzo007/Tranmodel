@@ -1,13 +1,15 @@
-"""Whole-route TNDP optimizer with surrogate screening, local search and Pareto archive."""
+"""Whole-route TNDP optimizer with automatic vehicle/frequency reconciliation."""
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
+import networkx as nx
 from .model import Evaluation, NetworkDesignConfig, Route, RouteSet
 from .mutations import mutate_route_set
 from .neighborhood import generate_network_moves
 from .objective import apply_objective
 from .pareto import compact_solution_record
 from .pareto_archive import ParetoArchive
+from .route_loads import select_vehicle_for_route
 
 @dataclass
 class TNDPResult:
@@ -20,7 +22,13 @@ Evaluator = Callable[[RouteSet], Evaluation]
 Progress = Callable[[str], None]
 
 class TNDPOptimizer:
-    """TNDP optimizer with constructive beam search, local search and bounded Pareto archive."""
+    """TNDP optimizer with automatic service-plan reconciliation.
+
+    Every candidate network is normalized before evaluation. A route's current
+    peak flow is used to select a capacity-feasible vehicle, then the canonical
+    operation model derives frequency, interval, release and fleet. This keeps
+    topology mutations from leaving stale rolling-stock/service parameters.
+    """
     def __init__(self, candidates: list[Route], evaluator: Evaluator,
                  config: NetworkDesignConfig | None = None,
                  fast_evaluator: Evaluator | None = None,
@@ -34,11 +42,68 @@ class TNDPOptimizer:
         self._graph = None
         self._fast_cache: dict[tuple, Evaluation] = {}
         self._full_cache: dict[tuple, Evaluation] = {}
+        self._service_cache: dict[tuple, Route] = {}
         self.archive = ParetoArchive(max_size=100)
 
     @staticmethod
     def _key(network: RouteSet) -> tuple:
         return tuple(sorted((r.nodes, round(float(r.frequency_vph), 6), r.vehicle_type) for r in network.routes))
+
+    def _route_length_km(self, route: Route) -> float:
+        if self._graph is None:
+            return 0.0
+        total = 0.0
+        for a, b in zip(route.nodes[:-1], route.nodes[1:]):
+            data = self._graph.get_edge_data(a, b)
+            if data is None:
+                data = self._graph.get_edge_data(b, a)
+            if data is None:
+                raise ValueError(f"No graph edge between route nodes {a} and {b}")
+            if isinstance(data, dict) and "length_km" in data:
+                total += float(data["length_km"])
+            else:
+                # MultiGraph-compatible fallback.
+                values = data.values() if isinstance(data, dict) else ()
+                total += min(float(v.get("length_km", 0.0)) for v in values)
+        return total
+
+    def _reconcile_route(self, route: Route) -> Route:
+        """Recalculate vehicle/frequency/release/fleet after a topology change."""
+        if self._graph is None:
+            return route
+        key = (route.nodes, round(float(route.max_section_flow_pph), 6), tuple(self.config.allowed_vehicle_types))
+        cached = self._service_cache.get(key)
+        if cached is not None:
+            return Route(route.nodes, route.route_id, cached.frequency_vph,
+                         route.max_section_flow_pph, cached.vehicle_type)
+        one_way_length = self._route_length_km(route)
+        if one_way_length <= 0:
+            return route
+        code, details = select_vehicle_for_route(
+            max_section_flow_pph=float(route.max_section_flow_pph),
+            route_length_km=2.0 * one_way_length,
+            allowed_vehicle_types=self.config.allowed_vehicle_types,
+            speed_kmh=self.config.speed_kmh,
+            interval_reserve_sec=self.config.interval_reserve_sec,
+            terminal_delay_reserve=self.config.terminal_delay_reserve,
+            charging_min_per_terminal=self.config.charging_min_per_terminal,
+            annual_days=self.config.annual_days,
+            park_trip_coefficient=self.config.park_trip_coefficient,
+            frequency_profile=self.config.frequency_profile,
+        )
+        reconciled = Route(route.nodes, route.route_id,
+                           float(details["frequency_vph"]),
+                           route.max_section_flow_pph, code)
+        self._service_cache[key] = reconciled
+        return reconciled
+
+    def _reconcile_network(self, network: RouteSet) -> RouteSet:
+        if self._graph is None:
+            return network
+        normalized = RouteSet()
+        for route in network.routes:
+            normalized.add(self._reconcile_route(route))
+        return normalized
 
     def _record(self, network: RouteSet, ev: Evaluation) -> None:
         md = ev.metadata or {}
@@ -53,6 +118,7 @@ class TNDPOptimizer:
             metadata={"key": repr(self._key(network)), "evaluator": md.get("evaluator", "unknown")}))
 
     def _evaluate(self, network: RouteSet, full: bool = True) -> Evaluation:
+        network = self._reconcile_network(network)
         cache = self._full_cache if full else self._fast_cache
         key = self._key(network)
         if key not in cache:
@@ -60,6 +126,9 @@ class TNDPOptimizer:
             cache[key] = apply_objective(network, raw, self.config)
             self._record(network, cache[key])
         return cache[key]
+
+    def _normalize_trial(self, network: RouteSet) -> RouteSet:
+        return self._reconcile_network(network)
 
     def _notify(self, message: str) -> None:
         if self.progress: self.progress(message)
@@ -88,14 +157,16 @@ class TNDPOptimizer:
             expanded.sort(key=lambda x: x[0])
             unique = {}
             for _, state in expanded:
-                unique.setdefault(self._key(state), state)
+                unique.setdefault(self._key(self._normalize_trial(state)), self._normalize_trial(state))
                 if len(unique) >= self.config.beam_width: break
             states = list(unique.values())
         return states
 
     def _screen_and_exact(self, trials, current):
         unique = {}
-        for trial, meta in trials: unique.setdefault(self._key(trial), (trial, meta))
+        for trial, meta in trials:
+            normalized = self._normalize_trial(trial)
+            unique.setdefault(self._key(normalized), (normalized, meta))
         ranked = sorted(((self._evaluate(t, full=False).score, i, t, m) for i, (t, m) in enumerate(unique.values())))
         top_k = min(self.config.full_candidates_per_iteration, len(ranked))
         best_network, best_eval, best_meta = None, current, None
@@ -108,7 +179,7 @@ class TNDPOptimizer:
 
     def solve(self, initial: RouteSet | None = None, graph=None) -> TNDPResult:
         self._graph = graph
-        beam = [initial.copy()] if initial is not None and initial.route_count() else self._construct_initial_beam()
+        beam = [self._normalize_trial(initial.copy())] if initial is not None and initial.route_count() else self._construct_initial_beam()
         if not beam: raise RuntimeError("TNDP could not construct an initial route network")
         scored = [(n, self._evaluate(n, True)) for n in beam]
         network, current = min(scored, key=lambda x: x[1].score)
@@ -125,9 +196,10 @@ class TNDPOptimizer:
             expanded.sort(key=lambda x: x[0])
             states, seen = [], set()
             for _, state in expanded:
-                k = self._key(state)
+                normalized = self._normalize_trial(state)
+                k = self._key(normalized)
                 if k in seen: continue
-                seen.add(k); states.append(state)
+                seen.add(k); states.append(normalized)
                 if len(states) >= self.config.beam_width: break
             if not states: break
             scored = [(n, self._evaluate(n, True)) for n in states]
